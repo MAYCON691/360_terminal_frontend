@@ -1,7 +1,9 @@
+import Vista360 from '@/components/Vista360'
+
 export default function Home() {
   return (
     <main>
-      <div>Hello world!</div>
+      <Vista360 />
     </main>
-  );
+  )
 }

@@ -1,1 +1,407 @@
+/* app/globals.css */
 @import "tailwindcss";
+
+/* ==========================================================================
+   Vista360 — estilos globales
+   Todo lo visual de la vista 360° (Navbar, botón de entrada, cajita de
+   coordenadas, pantalla de carga) vive aquí como clases reales, en vez de
+   objetos de estilo en línea. Las variables --v360-* controlan la estética
+   "liquid glass" que se repite en toda la interfaz: cambiarlas acá cambia
+   el look completo de una sola vez.
+   ========================================================================== */
+
+:root {
+  /* Vidrio con un poco de gris (en vez de blanco puro) para que se note más
+     sobre una foto clara, con más blur/saturación para que el efecto se
+     sienta de verdad. */
+  --v360-glass-bg: rgba(58, 62, 72, 0.38);
+  --v360-glass-bg-strong: rgba(70, 75, 88, 0.52);
+  --v360-glass-border: rgba(255, 255, 255, 0.22);
+  --v360-glass-blur: blur(28px) saturate(170%);
+  --v360-accent: #05d5ff;
+  --v360-shadow: 0 12px 34px rgba(0, 0, 0, 0.38);
+  /* Esquinas marcadas, no pill — "esquinado" en vez de redondeado. */
+  --v360-radius: 14px;
+  --v360-radius-sm: 10px;
+}
+
+/* ---------- Contenedor raíz ---------- */
+.v360-root {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  overflow: hidden;
+}
+
+.v360-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  transition: opacity 0.4s ease;
+}
+.v360-canvas--grab {
+  cursor: grab;
+}
+.v360-canvas--default {
+  cursor: default;
+}
+
+/* ---------- Efecto "vidrio líquido" reutilizable ---------- */
+.v360-glass {
+  background: var(--v360-glass-bg);
+  backdrop-filter: var(--v360-glass-blur);
+  -webkit-backdrop-filter: var(--v360-glass-blur);
+  border: 1px solid var(--v360-glass-border);
+  box-shadow: var(--v360-shadow);
+  border-radius: var(--v360-radius);
+}
+
+/* ---------- Velo sobre toda la escena — opaco CLARO, casi imperceptible ---------- */
+.v360-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 4000;
+  pointer-events: none;
+  background:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.20) 0%, rgba(0, 0, 0, 0) 22%, rgba(0, 0, 0, 0) 78%, rgba(0, 0, 0, 0.18) 100%),
+    radial-gradient(ellipse at 50% 45%, rgba(0, 0, 0, 0) 45%, rgba(0, 0, 0, 0.10) 100%);
+}
+
+/* ---------- Pantalla de carga ---------- */
+.v360-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 20000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.v360-loading__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 28px 36px;
+}
+.v360-loading__spinner {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--v360-accent);
+  animation: v360-spin 0.9s linear infinite;
+}
+.v360-loading__text {
+  color: #eaf6ff;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-align: center;
+}
+
+/* ---------- Barra superior (Navbar) ---------- */
+.v360-navbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 28px 44px;
+}
+/* Franja borrosa + gris de fondo, detrás de todo el contenido de la barra,
+   para que el "vidrio" de cada botón resalte todavía más sobre la foto. */
+.v360-navbar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  background: linear-gradient(to bottom, rgba(20, 22, 26, 0.28) 0%, rgba(20, 22, 26, 0.12) 60%, rgba(20, 22, 26, 0) 100%);
+  pointer-events: none;
+}
+.v360-navbar__logo {
+  display: flex;
+  align-items: center;
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.v360-navbar__logo img {
+  height: 78px;
+  width: auto;
+  filter: drop-shadow(0 3px 14px rgba(0, 0, 0, 0.5));
+}
+.v360-navbar__pills {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+}
+.v360-pill {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  padding: 13px 30px;
+  border-radius: var(--v360-radius-sm);
+  border: none;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.62);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.25s ease, color 0.35s ease, transform 0.2s ease;
+}
+.v360-pill--active {
+  font-weight: 700;
+  color: #fff;
+  background: var(--v360-glass-bg-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+.v360-navbar__login {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-width: 150px;
+  padding: 15px 28px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.3px;
+  color: #fff;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: color 0.35s ease, transform 0.2s ease;
+}
+
+/* Los botones "Espacios" e "Iniciar sesión" son decorativos por ahora — no
+   llevan a ningún lado — pero deben SENTIRSE clicables: al pasar el mouse se
+   "llenan" de líquido de abajo hacia arriba, y al hacer clic dan un
+   pequeño rebote. "Inicio" ya funciona de verdad (vuelve al planeta), así
+   que solo recibe un brillo sutil para no confundirse con el resto. */
+.v360-pill::after,
+.v360-navbar__login::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0%;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(5, 213, 255, 0.92) 0%, rgba(4, 150, 255, 0.95) 100%);
+  transition: height 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.v360-pill:not(.v360-pill--active):hover,
+.v360-navbar__login:hover {
+  color: #04141d;
+}
+.v360-pill:not(.v360-pill--active):hover::after,
+.v360-navbar__login:hover::after {
+  height: 100%;
+}
+.v360-pill--active:hover {
+  filter: brightness(1.15);
+}
+.v360-pill:active,
+.v360-navbar__login:active {
+  transform: scale(0.96);
+}
+
+/* ---------- Cajita de coordenadas — herramienta temporal (solo escritorio) ---------- */
+.v360-coords {
+  position: absolute;
+  top: 148px;
+  left: 24px;
+  z-index: 9000;
+  min-width: 190px;
+  padding: 14px 18px;
+  color: #fff;
+  font-family: monospace;
+}
+.v360-coords__value {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+/* ---------- Botón "INGRESAR" ---------- */
+.v360-cta {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 17px 36px;
+  border-radius: var(--v360-radius);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 1.5px;
+  color: #fff;
+  cursor: pointer;
+  isolation: isolate;
+  overflow: hidden;
+  animation: v360-fade-in 0.5s ease-out, v360-cta-glow 2.8s ease-in-out infinite;
+  transition:
+    transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.4s ease,
+    border-color 0.4s ease,
+    letter-spacing 0.4s ease;
+}
+.v360-cta::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  z-index: -1;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.65) 47%,
+    rgba(5, 213, 255, 0.75) 52%,
+    transparent 70%
+  );
+  transform: translateX(-140%);
+  transition: transform 0.85s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.v360-cta__arrow {
+  display: inline-block;
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.v360-cta:hover {
+  transform: translateX(-50%) translateY(-3px) scale(1.045);
+  background: var(--v360-glass-bg-strong);
+  border-color: rgba(5, 213, 255, 0.6);
+  letter-spacing: 2.2px;
+  box-shadow:
+    0 18px 46px rgba(5, 213, 255, 0.32),
+    0 12px 34px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.v360-cta:hover::before {
+  transform: translateX(140%);
+}
+.v360-cta:hover .v360-cta__arrow {
+  transform: translateX(8px);
+}
+.v360-cta:active {
+  transform: translateX(-50%) translateY(-1px) scale(1.01);
+}
+
+/* ---------- Animaciones ---------- */
+@keyframes v360-fade-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+@keyframes v360-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes v360-cta-glow {
+  0%,
+  100% {
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 0 0 rgba(5, 213, 255, 0);
+  }
+  50% {
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25),
+      0 0 26px rgba(5, 213, 255, 0.18);
+  }
+}
+
+/* ==========================================================================
+   Responsivo
+   ========================================================================== */
+
+/* ---------- Tablets y celulares grandes ---------- */
+@media (max-width: 860px) {
+  .v360-navbar {
+    padding: 18px 20px;
+  }
+  .v360-navbar__logo img {
+    height: 52px;
+  }
+  .v360-navbar__pills {
+    gap: 2px;
+    padding: 6px;
+  }
+  .v360-pill {
+    padding: 10px 18px;
+    font-size: 13px;
+  }
+  .v360-navbar__login {
+    min-width: unset;
+    padding: 11px 18px;
+    font-size: 13px;
+  }
+  .v360-cta {
+    padding: 14px 28px;
+    font-size: 13px;
+    letter-spacing: 1.1px;
+    bottom: 40px;
+  }
+  .v360-coords {
+    top: 118px;
+  }
+}
+
+/* ---------- Celulares ---------- */
+@media (max-width: 600px) {
+  .v360-navbar {
+    padding: 14px 14px;
+  }
+  .v360-navbar__logo img {
+    height: 40px;
+  }
+  .v360-navbar__logo {
+    min-width: 40px;
+  }
+  .v360-navbar__pills {
+    padding: 4px;
+  }
+  .v360-pill {
+    padding: 8px 12px;
+    font-size: 11px;
+    letter-spacing: 0.2px;
+  }
+  .v360-navbar__login {
+    padding: 9px 12px;
+    font-size: 11px;
+  }
+  .v360-cta {
+    padding: 12px 22px;
+    font-size: 12px;
+    letter-spacing: 0.8px;
+    gap: 6px;
+    bottom: 28px;
+  }
+  .v360-loading__card {
+    padding: 22px 26px;
+  }
+
+  /* La cajita de coordenadas es una herramienta de trabajo para escritorio:
+     en celular no debe aparecer. */
+  .v360-coords {
+    display: none;
+  }
+}
