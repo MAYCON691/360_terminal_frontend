@@ -48,9 +48,18 @@ const FIXED_ENTER_YAW_DEG: number | null = 6.2
 interface Vista360Props {
   /** Ruta de tu foto 360° equirectangular dentro de /public */
   src?: string
+  /**
+   * Se llama cada vez que termina un vuelo — 'entered' apenas termina
+   * INGRESAR, 'planet' apenas termina de volver a Inicio. Opcional: si no lo
+   * pasás, Vista360 se comporta exactamente igual que siempre. Es lo único
+   * que se agregó acá, para que afuera (app/page.tsx) se pueda saber cuándo
+   * mostrar el botón "Visitar Terminal Metropolitana" sin tocar nada de la
+   * lógica del planeta.
+   */
+  onModeChange?: (mode: 'planet' | 'entered') => void
 }
 
-export default function Vista360({ src = '/DJI_0855.jpg' }: Vista360Props) {
+export default function Vista360({ src = '/DJI_0855.jpg', onModeChange }: Vista360Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const [loading, setLoading] = useState(true)
@@ -230,13 +239,49 @@ export default function Vista360({ src = '/DJI_0855.jpg' }: Vista360Props) {
 
     resizeCanvas()
     window.addEventListener('resize', resizeCanvas)
+    // Además del evento 'resize' de la ventana, observamos el propio canvas.
+    // En celular, la barra de direcciones se esconde/aparece después de que
+    // ya montamos (y a veces sin disparar 'resize'), así que el tamaño real
+    // del canvas puede asentarse un instante después del primer renderCanvas().
+    // Sin esto, esa primera medida mala se queda pegada para siempre y la
+    // esfera se ve negra (viewport de 0×0 o recortado).
+    let ro: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => resizeCanvas())
+      ro.observe(canvas)
+    }
 
     const img = new Image()
     img.crossOrigin = 'anonymous'
     img.onload = () => {
+      // Las fotos de dron suelen ser enormes (equirectangulares de 8000px+
+      // de ancho). Las GPUs de escritorio casi siempre aguantan eso, pero
+      // muchas GPUs de celular tienen un límite bastante más bajo — si la
+      // textura lo supera, texImage2D falla en silencio y queda todo negro.
+      // Por eso, si la imagen no entra, la reescalamos primero en un canvas
+      // 2D auxiliar antes de subirla como textura.
+      const maxSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number
+      let source: TexImageSource = img
+      if (img.width > maxSize || img.height > maxSize) {
+        const scale = maxSize / Math.max(img.width, img.height)
+        const scaledCanvas = document.createElement('canvas')
+        scaledCanvas.width = Math.max(1, Math.floor(img.width * scale))
+        scaledCanvas.height = Math.max(1, Math.floor(img.height * scale))
+        const ctx2d = scaledCanvas.getContext('2d')
+        if (ctx2d) {
+          ctx2d.drawImage(img, 0, 0, scaledCanvas.width, scaledCanvas.height)
+          source = scaledCanvas
+        }
+      }
+
       gl.bindTexture(gl.TEXTURE_2D, texture)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
       gl.uniform1i(uniformsRef.current.uTex, 0)
+
+      // El layout puede haber terminado de asentarse recién ahora (sobre
+      // todo en celular), así que volvemos a medir el canvas antes de
+      // arrancar a dibujar.
+      resizeCanvas()
 
       setLoading(false)
       buttonTimerRef.current = setTimeout(() => setShowEnterButton(true), SHOW_BUTTON_DELAY)
@@ -265,6 +310,7 @@ export default function Vista360({ src = '/DJI_0855.jpg' }: Vista360Props) {
       if (morphRafRef.current) cancelAnimationFrame(morphRafRef.current)
       if (buttonTimerRef.current) clearTimeout(buttonTimerRef.current)
       window.removeEventListener('resize', resizeCanvas)
+      if (ro) ro.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src])
@@ -345,6 +391,7 @@ export default function Vista360({ src = '/DJI_0855.jpg' }: Vista360Props) {
         // A partir de aquí, arrastrar y hacer scroll siguen funcionando igual.
         morphingRef.current = false
         setMorphing(false)
+        onModeChange?.('entered')
       }
     }
 
@@ -386,6 +433,7 @@ export default function Vista360({ src = '/DJI_0855.jpg' }: Vista360Props) {
         morphingRef.current = false
         setMorphing(false)
         setShowEnterButton(true)
+        onModeChange?.('planet')
       }
     }
 
