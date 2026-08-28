@@ -1,45 +1,34 @@
 // type/panolens.d.ts
 //
 // panolens@0.12.1 no trae sus propios tipos (ni existe @types/panolens), así
-// que estas declaraciones cubren únicamente lo que Vista360.tsx realmente
-// usa. No es una definición completa de toda la librería.
+// que estas declaraciones cubren únicamente lo que Vista360.tsx e
+// InteriorTour.tsx realmente usan. No es una definición completa de toda
+// la librería.
 
 declare module 'panolens' {
   import * as THREE from 'three'
 
-  // ---------------------------------------------------------------------
-  // Controls de cámara internos del Viewer (viewer.OrbitControls). No se
-  // exportan como clase importable desde 'panolens', solo existen como
-  // instancia colgada del Viewer.
-  // ---------------------------------------------------------------------
   interface PanolensOrbitControls {
     enabled: boolean
     target: THREE.Vector3
     object: THREE.Camera
-
     noPan: boolean
     noZoom: boolean
     noRotate: boolean
-
     minPolarAngle: number
     maxPolarAngle: number
     minAzimuthAngle: number
     maxAzimuthAngle: number
-
     minDistance: number
     maxDistance: number
     minFov: number
     maxFov: number
-
     rotateSpeed: number
     zoomSpeed: number
-
     autoRotate: boolean
     autoRotateSpeed: number
-
     momentumScalingFactor: number
     momentumDampingFactor: number
-
     update(ignoreUpdate?: boolean): void
     reset(): void
     getPolarAngle(): number
@@ -47,12 +36,11 @@ declare module 'panolens' {
     dispose(): void
   }
 
-  // ---------------------------------------------------------------------
-  // Panorama base / Infospot
-  // ---------------------------------------------------------------------
   class Panorama extends THREE.Mesh {
     type: string
     animationDuration: number
+    /** true una vez que la textura ya terminó de descargarse/decodificarse. */
+    loaded: boolean
     dispose(): void
     onEnter(): void
     onLeave(): void
@@ -76,9 +64,12 @@ declare module 'panolens' {
     removeEventListener(type: string, listener: (event: any) => void): void
   }
 
-  // ---------------------------------------------------------------------
-  // Viewer
-  // ---------------------------------------------------------------------
+  /** Íconos de fábrica listos para pasarle a `new Infospot(size, DataImage.Arrow)`. */
+  const DataImage: {
+    Info: string
+    Arrow: string
+  }
+
   interface ViewerOptions {
     container?: HTMLElement
     controlBar?: boolean
@@ -103,34 +94,26 @@ declare module 'panolens' {
 
   class Viewer {
     constructor(options?: ViewerOptions)
-
     camera: THREE.PerspectiveCamera
     scene: THREE.Scene
     renderer: THREE.WebGLRenderer
     container: HTMLElement
     panorama: Panorama | null
-
     OrbitControls: PanolensOrbitControls
     control: PanolensOrbitControls
-
     add(...objects: THREE.Object3D[]): void
     remove(object: THREE.Object3D): void
     setPanorama(pano: Panorama): void
-
     getCamera(): THREE.PerspectiveCamera
     getControl(): PanolensOrbitControls
     getScene(): THREE.Scene
     getRenderer(): THREE.WebGLRenderer
     getContainer(): HTMLElement
-
     onWindowResize(width?: number, height?: number): void
-
     enableControl(index?: number): void
     disableControl(): void
-
     addEventListener(type: string, listener: (event: any) => void): void
     removeEventListener(type: string, listener: (event: any) => void): void
-
     dispose(): void
     destroy(): void
   }

@@ -652,4 +652,103 @@
   .tvisit-overlay__text {
     font-size: 13px;
   }
+}/* ==========================================================================
+   Tarjeta de información de un hotspot "info" — panel de vidrio anclado
+   abajo, con velo detrás para poder cerrarla tocando afuera. Los hotspots
+   en sí (flecha y "i") son los propios de panolens (PANOLENS.Infospot +
+   DataImage.Arrow/Info) — no llevan estilos acá, panolens ya los dibuja.
+   ========================================================================== */
+
+.tvisit-info-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: rgba(4, 6, 10, 0.35);
+  animation: tvisit-fade-in-plain 0.25s ease;
+}
+
+.tvisit-info-panel {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  z-index: 260;
+  width: min(440px, calc(100vw - 48px));
+  padding: 28px 30px 26px;
+  color: #fff;
+  animation: tvisit-fade-in-up 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  transform: translateX(-50%);
+}
+.tvisit-info-panel__close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.tvisit-info-panel__close:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.tvisit-info-panel__eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--v360-accent);
+  margin-bottom: 8px;
+}
+.tvisit-info-panel__title {
+  margin: 0 0 10px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+.tvisit-info-panel__text {
+  margin: 0 0 10px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.88);
+}
+.tvisit-info-panel__text:last-of-type {
+  margin-bottom: 0;
+}
+
+@keyframes tvisit-fade-in-plain {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes tvisit-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@media (max-width: 600px) {
+  .tvisit-info-panel {
+    bottom: 20px;
+    padding: 24px 22px 22px;
+    width: calc(100vw - 32px);
+  }
+  .tvisit-info-panel__title {
+    font-size: 17px;
+  }
+  .tvisit-info-panel__text {
+    font-size: 13.5px;
+  }
 }

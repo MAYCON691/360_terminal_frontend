@@ -22,9 +22,7 @@ export default function Home() {
 
       <VisitTerminalButton onClick={() => setVisiting(true)} visible={mode === 'entered' && !visiting} />
 
-      {visiting ? (
-        <InteriorTour src="/DJI_085511.jpg" onExit={() => setVisiting(false)} />
-      ) : null}
+      {visiting ? <InteriorTour onExit={() => setVisiting(false)} /> : null}
     </main>
   )
 }
