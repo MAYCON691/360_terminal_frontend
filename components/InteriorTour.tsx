@@ -60,7 +60,7 @@ const SCENES: Record<SceneId, SceneDef> = {
   },
   metroarena: {
     id: 'metroarena',
-    src: '/METROARENA.JPG',
+    src: '/METROARENA1.JPG',
     label: 'Metro Arena',
     backTo: 'terminal',
     arrows: [],
