@@ -67,7 +67,7 @@ const SCENES: Record<SceneId, SceneDef> = {
     infos: [
       {
         position: [4744.73, -1362.31, 728.25],
-        size: 220,
+        size: 500,
         label: 'Metro Arena',
         lines: [
           'Capacidad: Puede recibir a más de 6.000 personas de manera cómoda y organizada.',
