@@ -5,15 +5,30 @@ import { ShieldAlert, RotateCw } from "lucide-react";
 
 const UMBRAL_TAMANIO = 160;
 
+function esCelularOTablet() {
+  if (typeof window === "undefined") return true;
+  const sinMouseFino = !window.matchMedia("(pointer: fine)").matches;
+  const uaMovil = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(
+    navigator.userAgent
+  );
+  return sinMouseFino || uaMovil;
+}
+
 export default function DevToolsGuard() {
+  const [esPc, setEsPc] = useState(false);
   const [detectado, setDetectado] = useState(false);
 
+  // Se decide una sola vez, del lado del cliente, apenas monta.
   useEffect(() => {
-    // Bloquea el clic derecho (menú "Inspeccionar")
+    setEsPc(!esCelularOTablet());
+  }, []);
+
+  useEffect(() => {
+    if (!esPc) return; // en celular/tablet no se engancha NADA de esto
+
     const bloquearClicDerecho = (e: MouseEvent) => e.preventDefault();
     document.addEventListener("contextmenu", bloquearClicDerecho);
 
-    // Bloquea F12, Ctrl+Shift+I/J/C y Ctrl+U (ver código fuente)
     const bloquearAtajos = (e: KeyboardEvent) => {
       const tecla = e.key.toUpperCase();
       const bloqueado =
@@ -27,14 +42,12 @@ export default function DevToolsGuard() {
     };
     document.addEventListener("keydown", bloquearAtajos, true);
 
-    // Detecta DevTools acoplado, por diferencia de tamaño de ventana
     const chequearTamanio = () => {
       const anchoDiff = window.outerWidth - window.innerWidth > UMBRAL_TAMANIO;
       const altoDiff = window.outerHeight - window.innerHeight > UMBRAL_TAMANIO;
       if (anchoDiff || altoDiff) setDetectado(true);
     };
 
-    // Detecta DevTools abierto y activo, por la pausa que genera "debugger"
     const chequearDebugger = () => {
       const inicio = performance.now();
       // eslint-disable-next-line no-debugger
@@ -54,9 +67,9 @@ export default function DevToolsGuard() {
       document.removeEventListener("keydown", bloquearAtajos, true);
       clearInterval(intervalo);
     };
-  }, []);
+  }, [esPc]);
 
-  if (!detectado) return null;
+  if (!esPc || !detectado) return null;
 
   return (
     <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">

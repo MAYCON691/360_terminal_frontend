@@ -89,7 +89,56 @@ const MIN_SWITCH_OVERLAY_TIME = 450
 const SWITCH_OVERLAY_HOLD = 300
 const EXIT_DURATION = 500
 
+// Límite de lado más largo para cualquier textura de panorama. 4096 es un
+// tamaño que soportan prácticamente todos los navegadores y dispositivos
+// (incluido Safari en iPhone), a diferencia de las fotos de dron originales
+// que suelen venir en 8000px+ de ancho. Si en algún iPhone viejo sigue
+// fallando, bajalo a 2048.
+const MAX_TEXTURE_DIM = 4096
+// Si una textura no termina de cargar en este tiempo, dejamos de esperar y
+// avisamos en vez de quedarnos colgados para siempre.
+const LOAD_TIMEOUT = 15000
+
 const easeInOutCubic = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2)
+
+/**
+ * Devuelve una URL lista para usar como textura: la original si ya entra
+ * dentro de MAX_TEXTURE_DIM, o una versión reescalada (como blob URL) si no.
+ * Es el mismo control que ya existe en Vista360.tsx, aplicado acá a cada
+ * escena del recorrido interior — en Safari (iPhone y Mac) una textura
+ * demasiado grande no solo se ve mal: puede hacer que la pestaña se
+ * reinicie por presión de memoria, que es el síntoma de "se vuelve al
+ * principio" al entrar a Metro Arena.
+ */
+function prepararFuenteSegura(src: string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => {
+      if (img.width <= MAX_TEXTURE_DIM && img.height <= MAX_TEXTURE_DIM) {
+        resolve(src)
+        return
+      }
+      const escala = MAX_TEXTURE_DIM / Math.max(img.width, img.height)
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.floor(img.width * escala))
+      canvas.height = Math.max(1, Math.floor(img.height * escala))
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        resolve(src)
+        return
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      canvas.toBlob(
+        (blob) => resolve(blob ? URL.createObjectURL(blob) : src),
+        'image/jpeg',
+        0.9
+      )
+    }
+    img.onerror = () => resolve(src) // si falla el análisis, probamos igual con la original
+    img.src = src
+  })
+}
 
 export default function InteriorTour({ onExit }: InteriorTourProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -109,6 +158,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
   const [overlayText, setOverlayText] = useState(`Entrando a ${SCENES[START_SCENE].label}…`)
   const [overlayVisible, setOverlayVisible] = useState(true)
   const [infoPanel, setInfoPanel] = useState<{ label: string; lines: string[] } | null>(null)
+  const [errorCarga, setErrorCarga] = useState<string | null>(null)
 
   useEffect(() => { sceneIdRef.current = sceneId }, [sceneId])
   useEffect(() => { switchingRef.current = switching }, [switching])
@@ -117,7 +167,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     let cancelled = false
     const mountedAt = performance.now()
 
-    import('panolens').then((PANOLENS) => {
+    import('panolens').then(async (PANOLENS) => {
       if (cancelled || !containerRef.current) return
       panolensRef.current = PANOLENS
 
@@ -131,7 +181,10 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
       })
       viewerRef.current = viewer
 
-      const first = buildScenePanorama(PANOLENS, START_SCENE)
+      const srcSeguro = await prepararFuenteSegura(SCENES[START_SCENE].src)
+      if (cancelled) return
+
+      const first = buildScenePanorama(PANOLENS, START_SCENE, srcSeguro)
       panoramaCacheRef.current.set(START_SCENE, first)
 
       first.addEventListener('load', () => {
@@ -176,9 +229,9 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     return () => { if (revealRafRef.current) cancelAnimationFrame(revealRafRef.current) }
   }, [ready])
 
-  const buildScenePanorama = (PANOLENS: typeof PanolensNS, id: SceneId): PanolensNS.ImagePanorama => {
+  const buildScenePanorama = (PANOLENS: typeof PanolensNS, id: SceneId, srcSeguro: string): PanolensNS.ImagePanorama => {
     const scene = SCENES[id]
-    const pano = new PANOLENS.ImagePanorama(scene.src)
+    const pano = new PANOLENS.ImagePanorama(srcSeguro)
 
     pano.addEventListener('click', (event: { intersects?: Array<{ point: { x: number; y: number; z: number } }> }) => {
       const point = event.intersects?.[0]?.point
@@ -206,7 +259,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     return pano
   }
 
-  const getOrCreatePanorama = (id: SceneId): PanolensNS.ImagePanorama | null => {
+  const getOrCreatePanorama = async (id: SceneId): Promise<PanolensNS.ImagePanorama | null> => {
     const PANOLENS = panolensRef.current
     const viewer = viewerRef.current
     if (!PANOLENS || !viewer) return null
@@ -214,25 +267,32 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     const cache = panoramaCacheRef.current
     let pano = cache.get(id)
     if (!pano) {
-      pano = buildScenePanorama(PANOLENS, id)
+      const srcSeguro = await prepararFuenteSegura(SCENES[id].src)
+      pano = buildScenePanorama(PANOLENS, id, srcSeguro)
       cache.set(id, pano)
       viewer.add(pano)
     }
     return pano
   }
 
-  const goToScene = (targetId: SceneId) => {
+  const goToScene = async (targetId: SceneId) => {
     const viewer = viewerRef.current
     if (!viewer || switchingRef.current || targetId === sceneIdRef.current) return
 
-    const target = getOrCreatePanorama(targetId)
-    if (!target) return
-
     setInfoPanel(null)
+    setErrorCarga(null)
     setOverlayText(`Entrando a ${SCENES[targetId].label}…`)
     setOverlayVisible(true)
     setSwitching(true)
     setSceneId(targetId)
+
+    const target = await getOrCreatePanorama(targetId)
+    if (!target) {
+      setSwitching(false)
+      setOverlayVisible(false)
+      setErrorCarga('No se pudo cargar esta escena. Volvé a intentar.')
+      return
+    }
 
     const stopOverlay = () => {
       setTimeout(() => { setOverlayVisible(false); setSwitching(false) }, SWITCH_OVERLAY_HOLD)
@@ -245,7 +305,11 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     }
 
     const startedAt = performance.now()
+    let resuelto = false
+
     const onLoad = () => {
+      if (resuelto) return
+      resuelto = true
       target.removeEventListener('load', onLoad)
       const elapsed = performance.now() - startedAt
       const wait = Math.max(0, MIN_SWITCH_OVERLAY_TIME - elapsed)
@@ -253,6 +317,18 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     }
     target.addEventListener('load', onLoad)
     viewer.setPanorama(target)
+
+    // Si la textura nunca termina de cargar, no nos quedamos colgados: lo
+    // avisamos y dejamos que el usuario reintente en vez de que la app
+    // parezca "trabada" o vuelva sola al inicio sin explicación.
+    setTimeout(() => {
+      if (resuelto) return
+      resuelto = true
+      target.removeEventListener('load', onLoad)
+      setSwitching(false)
+      setOverlayVisible(false)
+      setErrorCarga('La imagen está tardando demasiado en cargar. Volvé a intentar.')
+    }, LOAD_TIMEOUT)
   }
 
   const handleExit = () => {
@@ -291,6 +367,14 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
           <span className="tvisit-overlay__text">{overlayText}</span>
         </div>
       </div>
+
+      {errorCarga ? (
+        <div className="tvisit-overlay">
+          <div className="tvisit-overlay__card v360-glass">
+            <span className="tvisit-overlay__text">{errorCarga}</span>
+          </div>
+        </div>
+      ) : null}
 
       {revealed ? (
         <button onClick={handleBack} disabled={switching} className="tvisit-back v360-glass">
