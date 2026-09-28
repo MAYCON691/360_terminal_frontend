@@ -1,11 +1,10 @@
 import type { Metadata } from "next";
-import DevToolsGuard from "../components/DevToolsGuard";
 
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "360 Terminal",
-  description: "Descubre la terminal desde otro anguloS",
+  description: "Descubre la terminal desde otro ángulo",
   icons: {
     icon: "/icono.jpg",
   },
@@ -13,15 +12,12 @@ export const metadata: Metadata = {
 
 export default function RootLayout({
   children,
-}: {
+}: Readonly<{
   children: React.ReactNode;
-}) {
+}>) {
   return (
-    <html lang="en">
-      <body>
-        <DevToolsGuard />
-        {children}
-      </body>
+    <html lang="es">
+      <body>{children}</body>
     </html>
   );
 }
