@@ -659,7 +659,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
                   cursor: 'pointer',
                 }}
               >
-                {infoLink.text} ↗
+                {infoLink.text} 
               </button>
             ) : null}
           </div>
