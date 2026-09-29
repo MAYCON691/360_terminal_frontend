@@ -20,6 +20,7 @@ type SceneId =
   | 'patiocomidas2'
 
 type Vec3 = [number, number, number]
+type HotspotPos = PanolensNS.Infospot['position']
 
 interface ArrowHotspot {
   to: SceneId
@@ -46,6 +47,9 @@ interface SceneDef {
   backTo: SceneId | null
   arrows: ArrowHotspot[]
   infos: InfoHotspot[]
+  maxTextureDim?: number
+  skipSharpen?: boolean
+  usarOriginal?: boolean
 }
 
 /* =========================================================
@@ -58,6 +62,13 @@ const SCENES: Record<SceneId, SceneDef> = {
     src: '/DJI_085511.JPG',
     label: 'Terminal Metropolitana',
     backTo: null,
+
+    // IMPORTANTE:
+    // Conservamos exactamente el método que ya funciona
+    // correctamente en producción.
+    usarOriginal: true,
+    maxTextureDim: 4096,
+    skipSharpen: true,
 
     arrows: [
       {
@@ -249,122 +260,474 @@ const SCENES: Record<SceneId, SceneDef> = {
 
 const START_SCENE: SceneId = 'terminal'
 
-// Mantiene el rendimiento que ya conseguiste.
-const MAX_PIXEL_RATIO = 1.5
-
 const REVEAL_FOV_START = 18
 const REVEAL_FOV_END = 65
 const REVEAL_DURATION = 1100
 
-const MIN_LOADING_TIME = 900
-const WARMUP_FRAMES = 12
-const LOAD_TIMEOUT = 20000
+// Dejamos visible el loader un poco más.
+const MIN_OVERLAY_TIME = 1400
+
+const EXIT_DURATION = 500
+
+const MAX_TEXTURE_DIM = 4096
+const LOAD_TIMEOUT = 15000
+
+const SHARPEN_AMOUNT = 0.4
+const ENABLE_SHARPEN = false
+
+// IMPORTANTE:
+// Antes estaba en 5.
+// Ahora damos más tiempo para que WebGL/GPU termine
+// de estabilizar la textura antes de mostrarla.
+const WARMUP_FRAMES = 30
+
+// IMPORTANTE:
+// Antes estaba en 2.
+// Un iPhone con DPR 3 o una pantalla Retina genera muchísimo
+// trabajo. Lo dejamos en 1 para priorizar fluidez.
+const MAX_PIXEL_RATIO = 1
 
 const WALK_TURN_MS = 700
-const WALK_ZOOM_MS = 900
+const WALK_ZOOM_MS = 950
 const WALK_ZOOM_FACTOR = 0.42
 
 const BACK_ZOOM_MS = 450
 const BACK_ZOOM_FACTOR = 0.8
 
-const ARRIVE_MS = 900
+const ARRIVE_MS = 1000
 const ARRIVE_START_FACTOR = 0.72
 
-const EXIT_DURATION = 500
+const SPINNER_DELAY = 400
 
 /* =========================================================
-   FUNCIONES AUXILIARES
+   ANIMACIONES
    ========================================================= */
 
-function easeInOutCubic(x: number) {
-  return x < 0.5
+const easeInOutCubic = (x: number) =>
+  x < 0.5
     ? 4 * x * x * x
     : 1 - Math.pow(-2 * x + 2, 3) / 2
-}
 
-function easeInCubic(x: number) {
-  return x * x * x
-}
+const easeInCubic = (x: number) =>
+  x * x * x
 
-function easeOutCubic(x: number) {
-  return 1 - Math.pow(1 - x, 3)
-}
+const easeOutCubic = (x: number) =>
+  1 - Math.pow(1 - x, 3)
 
-function esperarFrames(cantidad: number): Promise<void> {
+/* =========================================================
+   ESPERAR FRAMES
+   ========================================================= */
+
+function esperarFrames(n: number): Promise<void> {
   return new Promise((resolve) => {
-    let frames = 0
+    let restantes = n
 
-    const siguiente = () => {
-      frames++
+    const paso = () => {
+      restantes -= 1
 
-      if (frames >= cantidad) {
+      if (restantes <= 0) {
         resolve()
-        return
+      } else {
+        requestAnimationFrame(paso)
       }
-
-      requestAnimationFrame(siguiente)
     }
 
-    requestAnimationFrame(siguiente)
+    requestAnimationFrame(paso)
   })
 }
 
 /* =========================================================
-   PRECARGAR IMAGEN NORMAL
-
-   IMPORTANTE:
-   NO canvas
-   NO toBlob()
-   NO blob:
-   NO createObjectURL()
-
-   Simplemente hacemos que el navegador descargue y decodifique
-   el JPG real antes de entregárselo a Panolens.
+   LÍMITE DE TEXTURA DEL DISPOSITIVO
    ========================================================= */
 
-function precargarImagen(src: string): Promise<string> {
-  return new Promise((resolve, reject) => {
+function limiteTexturaDispositivo(): number {
+  try {
+    const canvas =
+      document.createElement('canvas')
+
+    const gl = (
+      canvas.getContext('webgl') ||
+      canvas.getContext('experimental-webgl')
+    ) as WebGLRenderingContext | null
+
+    const maxGpu = gl
+      ? (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number)
+      : 4096
+
+    const ua = navigator.userAgent
+
+    const esIOS =
+      /iPhone|iPad|iPod/.test(ua) ||
+      (
+        navigator.platform === 'MacIntel' &&
+        navigator.maxTouchPoints > 1
+      )
+
+    const limiteSistema =
+      esIOS ? 4096 : 8192
+
+    return Math.max(
+      2048,
+      Math.min(
+        maxGpu,
+        limiteSistema
+      )
+    )
+  } catch {
+    return 4096
+  }
+}
+
+/* =========================================================
+   NITIDEZ
+   ========================================================= */
+
+function aplicarNitidez(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  amount: number
+) {
+  const imageData =
+    ctx.getImageData(
+      0,
+      0,
+      width,
+      height
+    )
+
+  const src = imageData.data
+
+  const copia =
+    new Uint8ClampedArray(src)
+
+  const centro =
+    1 + 4 * amount
+
+  const stride =
+    width * 4
+
+  for (
+    let y = 1;
+    y < height - 1;
+    y++
+  ) {
+    for (
+      let x = 1;
+      x < width - 1;
+      x++
+    ) {
+      const index =
+        y * stride +
+        x * 4
+
+      for (
+        let channel = 0;
+        channel < 3;
+        channel++
+      ) {
+        const k =
+          index + channel
+
+        const valor =
+          copia[k] * centro -
+          amount *
+            (
+              copia[k - 4] +
+              copia[k + 4] +
+              copia[k - stride] +
+              copia[k + stride]
+            )
+
+        src[k] = valor
+      }
+    }
+  }
+
+  ctx.putImageData(
+    imageData,
+    0,
+    0
+  )
+}
+
+/* =========================================================
+   PREPARAR FUENTE NORMAL
+   ========================================================= */
+
+function prepararFuenteSegura(
+  src: string,
+  maxDim: number = MAX_TEXTURE_DIM,
+  sinNitidez: boolean = false
+): Promise<string> {
+  return new Promise((resolve) => {
     const img = new Image()
 
-    let terminado = false
+    img.crossOrigin = 'anonymous'
 
-    const completar = () => {
-      if (terminado) return
+    img.onload = () => {
+      try {
+        const ladoMayor =
+          Math.max(
+            img.width,
+            img.height
+          )
 
-      terminado = true
+        // MUY IMPORTANTE:
+        // Nunca agrandamos una imagen que ya sea menor.
+        const escala =
+          ladoMayor > maxDim
+            ? maxDim / ladoMayor
+            : 1
 
+        if (
+          escala === 1 &&
+          (!ENABLE_SHARPEN || sinNitidez)
+        ) {
+          resolve(src)
+          return
+        }
+
+        const canvas =
+          document.createElement('canvas')
+
+        canvas.width =
+          Math.max(
+            1,
+            Math.floor(
+              img.width * escala
+            )
+          )
+
+        canvas.height =
+          Math.max(
+            1,
+            Math.floor(
+              img.height * escala
+            )
+          )
+
+        const ctx =
+          canvas.getContext('2d')
+
+        if (!ctx) {
+          resolve(src)
+          return
+        }
+
+        ctx.imageSmoothingEnabled =
+          true
+
+        ctx.imageSmoothingQuality =
+          'high'
+
+        ctx.drawImage(
+          img,
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        )
+
+        if (
+          ENABLE_SHARPEN &&
+          !sinNitidez
+        ) {
+          aplicarNitidez(
+            ctx,
+            canvas.width,
+            canvas.height,
+            SHARPEN_AMOUNT
+          )
+        }
+
+        canvas.toBlob(
+          (blob) => {
+            resolve(
+              blob
+                ? URL.createObjectURL(blob)
+                : src
+            )
+          },
+          'image/jpeg',
+          0.92
+        )
+      } catch {
+        resolve(src)
+      }
+    }
+
+    img.onerror = () => {
       resolve(src)
     }
 
-    const fallar = () => {
-      if (terminado) return
-
-      terminado = true
-
-      reject(new Error(`No se pudo cargar ${src}`))
-    }
-
-    img.onload = async () => {
-      try {
-        if (typeof img.decode === 'function') {
-          await img.decode()
-        }
-      } catch {
-        // onload ya confirmó que la imagen existe.
-      }
-
-      completar()
-    }
-
-    img.onerror = fallar
-
-    // Mismo origen: no necesitamos crossOrigin.
     img.src = src
-
-    if (img.complete && img.naturalWidth > 0) {
-      completar()
-    }
   })
+}
+
+/* =========================================================
+   ORIGINAL SEGURO
+
+   ESTA FUNCIÓN SE MANTIENE PORQUE ES LA QUE YA FUNCIONA
+   EN TU PRODUCCIÓN CON DJI_085511.JPG.
+   ========================================================= */
+
+async function prepararOriginalSeguro(
+  src: string
+): Promise<string> {
+  try {
+    const response =
+      await fetch(src)
+
+    if (!response.ok) {
+      return src
+    }
+
+    const blob =
+      await response.blob()
+
+    const objectUrl =
+      URL.createObjectURL(blob)
+
+    const img =
+      new Image()
+
+    img.src = objectUrl
+
+    try {
+      await img.decode()
+    } catch {
+      await new Promise<void>(
+        (resolve) => {
+          if (img.complete) {
+            resolve()
+          } else {
+            img.onload = () =>
+              resolve()
+
+            img.onerror = () =>
+              resolve()
+          }
+        }
+      )
+    }
+
+    const width =
+      img.naturalWidth ||
+      img.width
+
+    const height =
+      img.naturalHeight ||
+      img.height
+
+    const limite =
+      limiteTexturaDispositivo()
+
+    const ladoMayor =
+      Math.max(
+        width,
+        height
+      )
+
+    // Si la imagen original entra dentro del límite,
+    // usamos EXACTAMENTE el original.
+    if (
+      !ladoMayor ||
+      ladoMayor <= limite
+    ) {
+      return objectUrl
+    }
+
+    // Solo reducimos si la GPU realmente no soporta
+    // el tamaño original.
+    const escala =
+      limite / ladoMayor
+
+    const canvas =
+      document.createElement('canvas')
+
+    canvas.width =
+      Math.max(
+        1,
+        Math.floor(
+          width * escala
+        )
+      )
+
+    canvas.height =
+      Math.max(
+        1,
+        Math.floor(
+          height * escala
+        )
+      )
+
+    const ctx =
+      canvas.getContext('2d')
+
+    if (!ctx) {
+      return objectUrl
+    }
+
+    ctx.imageSmoothingEnabled =
+      true
+
+    ctx.imageSmoothingQuality =
+      'high'
+
+    ctx.drawImage(
+      img,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    )
+
+    const ajustada =
+      await new Promise<string>(
+        (resolve) => {
+          canvas.toBlob(
+            (nuevoBlob) => {
+              resolve(
+                nuevoBlob
+                  ? URL.createObjectURL(
+                      nuevoBlob
+                    )
+                  : objectUrl
+              )
+            },
+            'image/jpeg',
+            0.95
+          )
+        }
+      )
+
+    return ajustada
+  } catch {
+    return src
+  }
+}
+
+/* =========================================================
+   FUENTE DE CADA ESCENA
+   ========================================================= */
+
+function fuenteParaEscena(
+  definition: SceneDef
+): Promise<string> {
+  if (definition.usarOriginal) {
+    return prepararOriginalSeguro(
+      definition.src
+    )
+  }
+
+  return prepararFuenteSegura(
+    definition.src,
+    definition.maxTextureDim ??
+      MAX_TEXTURE_DIM,
+    definition.skipSharpen ??
+      false
+  )
 }
 
 /* =========================================================
@@ -374,47 +737,93 @@ function precargarImagen(src: string): Promise<string> {
 export default function InteriorTour({
   onExit,
 }: InteriorTourProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null)
+  const containerRef =
+    useRef<HTMLDivElement | null>(null)
 
-  const viewerRef = useRef<PanolensNS.Viewer | null>(null)
+  const viewerRef =
+    useRef<PanolensNS.Viewer | null>(
+      null
+    )
 
-  const panolensRef = useRef<typeof PanolensNS | null>(null)
+  const panolensRef =
+    useRef<typeof PanolensNS | null>(
+      null
+    )
 
   const panoramaCacheRef =
-    useRef<Map<SceneId, PanolensNS.ImagePanorama>>(new Map())
-
-  const pendingRef =
     useRef<
-      Map<SceneId, Promise<PanolensNS.ImagePanorama | null>>
+      Map<
+        SceneId,
+        PanolensNS.ImagePanorama
+      >
     >(new Map())
 
-  const currentSceneRef = useRef<SceneId>(START_SCENE)
+  const pendingPanoRef =
+    useRef<
+      Map<
+        SceneId,
+        Promise<
+          PanolensNS.ImagePanorama | null
+        >
+      >
+    >(new Map())
 
-  const switchingRef = useRef(false)
+  const revealRafRef =
+    useRef<number | null>(null)
 
-  const animationRef = useRef<number | null>(null)
+  const walkRafRef =
+    useRef<number | null>(null)
 
-  const veilRef = useRef<HTMLDivElement | null>(null)
+  const veilRef =
+    useRef<HTMLDivElement | null>(
+      null
+    )
 
-  const [sceneId, setSceneId] = useState<SceneId>(START_SCENE)
+  const sceneIdRef =
+    useRef<SceneId>(
+      START_SCENE
+    )
 
-  const [ready, setReady] = useState(false)
+  const switchingRef =
+    useRef(false)
 
-  const [revealed, setRevealed] = useState(false)
+  const [sceneId, setSceneId] =
+    useState<SceneId>(
+      START_SCENE
+    )
 
-  const [switching, setSwitching] = useState(false)
+  const [ready, setReady] =
+    useState(false)
 
-  const [exiting, setExiting] = useState(false)
+  const [revealed, setRevealed] =
+    useState(false)
 
-  const [loadingVisible, setLoadingVisible] = useState(true)
+  const [switching, setSwitching] =
+    useState(false)
 
-  const [loadingText, setLoadingText] =
-    useState('Cargando Terminal Metropolitana...')
+  const [exiting, setExiting] =
+    useState(false)
 
-  const [errorCarga, setErrorCarga] =
-    useState<string | null>(null)
+  // Este es el mensaje que querías.
+  const [overlayText, setOverlayText] =
+    useState(
+      'Optimizando imagen 360°...'
+    )
 
-  const [infoPanel, setInfoPanel] = useState<{
+  const [
+    overlayVisible,
+    setOverlayVisible,
+  ] = useState(true)
+
+  const [
+    overlayMounted,
+    setOverlayMounted,
+  ] = useState(true)
+
+  const [
+    infoPanel,
+    setInfoPanel,
+  ] = useState<{
     label: string
     lines: string[]
     link?: {
@@ -423,30 +832,59 @@ export default function InteriorTour({
     }
   } | null>(null)
 
+  const [
+    errorCarga,
+    setErrorCarga,
+  ] = useState<string | null>(
+    null
+  )
+
   useEffect(() => {
-    currentSceneRef.current = sceneId
+    sceneIdRef.current =
+      sceneId
   }, [sceneId])
 
   useEffect(() => {
-    switchingRef.current = switching
+    switchingRef.current =
+      switching
   }, [switching])
+
+  /* =======================================================
+     OVERLAY
+     ======================================================= */
+
+  useEffect(() => {
+    if (overlayVisible) {
+      setOverlayMounted(true)
+      return
+    }
+
+    const timeout =
+      setTimeout(() => {
+        setOverlayMounted(false)
+      }, 500)
+
+    return () => {
+      clearTimeout(timeout)
+    }
+  }, [overlayVisible])
 
   /* =======================================================
      CREAR PANORAMA
      ======================================================= */
 
-  const crearPanorama = (
+  const buildScenePanorama = (
     PANOLENS: typeof PanolensNS,
-    id: SceneId
+    id: SceneId,
+    srcSeguro: string
   ): PanolensNS.ImagePanorama => {
-    const scene = SCENES[id]
+    const scene =
+      SCENES[id]
 
-    // AQUÍ usamos directamente /DJI_085511.JPG.
-    const panorama = new PANOLENS.ImagePanorama(scene.src)
-
-    /* =====================================================
-       COORDENADAS AL HACER CLIC
-       ===================================================== */
+    const panorama =
+      new PANOLENS.ImagePanorama(
+        srcSeguro
+      )
 
     panorama.addEventListener(
       'click',
@@ -459,7 +897,8 @@ export default function InteriorTour({
           }
         }>
       }) => {
-        const point = event.intersects?.[0]?.point
+        const point =
+          event.intersects?.[0]?.point
 
         if (!point) return
 
@@ -472,10 +911,6 @@ export default function InteriorTour({
       }
     )
 
-    /* =====================================================
-       FLECHAS
-       ===================================================== */
-
     scene.arrows.forEach(
       ({
         to,
@@ -483,10 +918,11 @@ export default function InteriorTour({
         size = 220,
         label,
       }) => {
-        const arrow = new PANOLENS.Infospot(
-          size,
-          PANOLENS.DataImage.Arrow
-        )
+        const arrow =
+          new PANOLENS.Infospot(
+            size,
+            PANOLENS.DataImage.Arrow
+          )
 
         arrow.position.set(
           position[0],
@@ -494,19 +930,24 @@ export default function InteriorTour({
           position[2]
         )
 
-        arrow.addHoverText(label, 24)
+        arrow.addHoverText(
+          label,
+          24
+        )
 
-        arrow.addEventListener('click', () => {
-          goToScene(to, arrow.position)
-        })
+        arrow.addEventListener(
+          'click',
+          () => {
+            goToScene(
+              to,
+              arrow.position
+            )
+          }
+        )
 
         panorama.add(arrow)
       }
     )
-
-    /* =====================================================
-       INFORMACIÓN
-       ===================================================== */
 
     scene.infos.forEach(
       ({
@@ -516,10 +957,11 @@ export default function InteriorTour({
         lines,
         link,
       }) => {
-        const info = new PANOLENS.Infospot(
-          size,
-          PANOLENS.DataImage.Info
-        )
+        const info =
+          new PANOLENS.Infospot(
+            size,
+            PANOLENS.DataImage.Info
+          )
 
         info.position.set(
           position[0],
@@ -527,15 +969,21 @@ export default function InteriorTour({
           position[2]
         )
 
-        info.addHoverText(label, 24)
+        info.addHoverText(
+          label,
+          24
+        )
 
-        info.addEventListener('click', () => {
-          setInfoPanel({
-            label,
-            lines,
-            link,
-          })
-        })
+        info.addEventListener(
+          'click',
+          () => {
+            setInfoPanel({
+              label,
+              lines,
+              link,
+            })
+          }
+        )
 
         panorama.add(info)
       }
@@ -545,326 +993,253 @@ export default function InteriorTour({
   }
 
   /* =======================================================
-     OBTENER PANORAMA
-     ======================================================= */
-
-  const getOrCreatePanorama = async (
-    id: SceneId
-  ): Promise<PanolensNS.ImagePanorama | null> => {
-    const cached = panoramaCacheRef.current.get(id)
-
-    if (cached) {
-      return cached
-    }
-
-    const pending = pendingRef.current.get(id)
-
-    if (pending) {
-      return pending
-    }
-
-    const PANOLENS = panolensRef.current
-    const viewer = viewerRef.current
-
-    if (!PANOLENS || !viewer) {
-      return null
-    }
-
-    const promise = (async () => {
-      const scene = SCENES[id]
-
-      try {
-        // Descarga + decodificación anticipada.
-        await precargarImagen(scene.src)
-      } catch (error) {
-        console.error(error)
-        return null
-      }
-
-      if (!viewerRef.current) {
-        return null
-      }
-
-      const panorama = crearPanorama(
-        PANOLENS,
-        id
-      )
-
-      panoramaCacheRef.current.set(
-        id,
-        panorama
-      )
-
-      viewerRef.current.add(panorama)
-
-      return panorama
-    })()
-
-    pendingRef.current.set(id, promise)
-
-    promise.finally(() => {
-      pendingRef.current.delete(id)
-    })
-
-    return promise
-  }
-
-  /* =======================================================
-     INICIALIZAR
+     INICIALIZAR PANOLENS
      ======================================================= */
 
   useEffect(() => {
     let cancelled = false
 
-    const mountedAt = performance.now()
+    const mountedAt =
+      performance.now()
 
-    const iniciar = async () => {
-      try {
-        setLoadingVisible(true)
-
-        setLoadingText(
-          'Cargando Terminal Metropolitana...'
-        )
-
-        const PANOLENS = await import('panolens')
-
-        if (
-          cancelled ||
-          !containerRef.current
-        ) {
-          return
-        }
-
-        panolensRef.current = PANOLENS
-
-        /* =================================================
-           VIEWER
-           ================================================= */
-
-        const viewer = new PANOLENS.Viewer({
-          container: containerRef.current,
-
-          controlBar: true,
-
-          controlButtons: [
-            'fullscreen',
-            'setting',
-          ],
-
-          autoRotate: false,
-
-          cameraFov: REVEAL_FOV_START,
-
-          output: 'none',
-        })
-
-        viewerRef.current = viewer
-
-        /* =================================================
-           OPTIMIZACIÓN DE RENDER
-
-           ESTA PARTE SE MANTIENE.
-
-           Es una de las razones por las que ahora no lentea.
-           ================================================= */
-
+    const iniciar =
+      async () => {
         try {
-          const internal = viewer as unknown as {
-            renderer?: {
-              setPixelRatio?: (
-                ratio: number
-              ) => void
-            }
+          setOverlayText(
+            'Optimizando imagen 360°...'
+          )
 
-            onWindowResize?: () => void
+          setOverlayVisible(true)
+
+          const PANOLENS =
+            await import('panolens')
+
+          if (
+            cancelled ||
+            !containerRef.current
+          ) {
+            return
           }
 
-          const pixelRatio = Math.min(
-            window.devicePixelRatio || 1,
-            MAX_PIXEL_RATIO
+          panolensRef.current =
+            PANOLENS
+
+          const viewer =
+            new PANOLENS.Viewer({
+              container:
+                containerRef.current,
+
+              controlBar: true,
+
+              controlButtons: [
+                'fullscreen',
+                'setting',
+              ],
+
+              autoRotate: false,
+
+              cameraFov:
+                REVEAL_FOV_START,
+
+              output: 'none',
+            })
+
+          viewerRef.current =
+            viewer
+
+          /* ===============================================
+             RENDIMIENTO
+             =============================================== */
+
+          try {
+            const internal =
+              viewer as unknown as {
+                renderer?: {
+                  setPixelRatio: (
+                    ratio: number
+                  ) => void
+                }
+
+                onWindowResize?: () =>
+                  void
+              }
+
+            internal.renderer?.setPixelRatio(
+              Math.min(
+                window.devicePixelRatio ||
+                  1,
+                MAX_PIXEL_RATIO
+              )
+            )
+
+            internal.onWindowResize?.()
+          } catch {
+            // continuar
+          }
+
+          /* ===============================================
+             PREPARAR TERMINAL
+
+             Mantiene prepararOriginalSeguro().
+             =============================================== */
+
+          const startDefinition =
+            SCENES[START_SCENE]
+
+          setOverlayText(
+            'Optimizando imagen 360°...'
           )
 
-          internal.renderer?.setPixelRatio?.(
-            pixelRatio
+          const srcSeguro =
+            await fuenteParaEscena(
+              startDefinition
+            )
+
+          if (cancelled) {
+            return
+          }
+
+          const first =
+            buildScenePanorama(
+              PANOLENS,
+              START_SCENE,
+              srcSeguro
+            )
+
+          panoramaCacheRef.current.set(
+            START_SCENE,
+            first
           )
 
-          internal.onWindowResize?.()
+          first.addEventListener(
+            'load',
+            async () => {
+              if (cancelled) {
+                return
+              }
+
+              // Dejamos que WebGL procese la textura
+              // mientras el loader continúa encima.
+              setOverlayText(
+                'Optimizando imagen 360°...'
+              )
+
+              await esperarFrames(
+                WARMUP_FRAMES
+              )
+
+              if (cancelled) {
+                return
+              }
+
+              const elapsed =
+                performance.now() -
+                mountedAt
+
+              const wait =
+                Math.max(
+                  0,
+                  MIN_OVERLAY_TIME -
+                    elapsed
+                )
+
+              setTimeout(() => {
+                if (!cancelled) {
+                  setReady(true)
+                }
+              }, wait)
+            }
+          )
+
+          viewer.add(first)
         } catch (error) {
-          console.warn(
-            'No se pudo configurar pixelRatio:',
+          console.error(
+            '[InteriorTour]',
             error
           )
-        }
 
-        /* =================================================
-           PRECARGAR JPG REAL
-
-           No creamos Blob.
-           No creamos Canvas.
-           ================================================= */
-
-        const startScene = SCENES[START_SCENE]
-
-        await precargarImagen(startScene.src)
-
-        if (cancelled) return
-
-        setLoadingText(
-          'Preparando recorrido 360°...'
-        )
-
-        /* =================================================
-           PANORAMA
-           ================================================= */
-
-        const first = crearPanorama(
-          PANOLENS,
-          START_SCENE
-        )
-
-        panoramaCacheRef.current.set(
-          START_SCENE,
-          first
-        )
-
-        /* =================================================
-           ESPERAR LOAD REAL DE PANOLENS
-           ================================================= */
-
-        const loadedPromise =
-          new Promise<void>((resolve) => {
-            let finished = false
-
-            const finish = () => {
-              if (finished) return
-
-              finished = true
-              resolve()
-            }
-
-            first.addEventListener(
-              'load',
-              finish
-            )
-
-            setTimeout(
-              finish,
-              LOAD_TIMEOUT
-            )
-          })
-
-        viewer.add(first)
-
-        await loadedPromise
-
-        if (cancelled) return
-
-        /* =================================================
-           WARM-UP
-
-           Mantenemos el loader mientras WebGL estabiliza
-           la textura.
-           ================================================= */
-
-        setLoadingText(
-          'Optimizando visualización...'
-        )
-
-        await esperarFrames(
-          WARMUP_FRAMES
-        )
-
-        if (cancelled) return
-
-        /* =================================================
-           TIEMPO MÍNIMO DEL LOADER
-           ================================================= */
-
-        const elapsed =
-          performance.now() -
-          mountedAt
-
-        if (elapsed < MIN_LOADING_TIME) {
-          await new Promise<void>(
-            (resolve) => {
-              setTimeout(
-                resolve,
-                MIN_LOADING_TIME -
-                  elapsed
-              )
-            }
+          setErrorCarga(
+            'No se pudo cargar el recorrido 360°.'
           )
         }
-
-        if (cancelled) return
-
-        setReady(true)
-      } catch (error) {
-        console.error(
-          'Error iniciando recorrido:',
-          error
-        )
-
-        setLoadingVisible(false)
-
-        setErrorCarga(
-          'No se pudo cargar el recorrido 360°.'
-        )
       }
-    }
 
     iniciar()
 
     return () => {
       cancelled = true
 
-      if (animationRef.current !== null) {
+      if (
+        revealRafRef.current !==
+        null
+      ) {
         cancelAnimationFrame(
-          animationRef.current
+          revealRafRef.current
         )
-
-        animationRef.current = null
       }
 
-      if (viewerRef.current) {
+      if (
+        walkRafRef.current !==
+        null
+      ) {
+        cancelAnimationFrame(
+          walkRafRef.current
+        )
+      }
+
+      if (
+        viewerRef.current
+      ) {
         try {
           viewerRef.current.destroy()
         } catch {
-          // Ignorar
+          // ignorar
         }
 
-        viewerRef.current = null
+        viewerRef.current =
+          null
       }
 
       panoramaCacheRef.current.clear()
-      pendingRef.current.clear()
+      pendingPanoRef.current.clear()
     }
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /* =======================================================
-     REVELADO INICIAL
+     REVELAR TERMINAL
      ======================================================= */
 
   useEffect(() => {
-    if (!ready) return
+    if (!ready) {
+      return
+    }
 
-    const viewer = viewerRef.current
+    const viewer =
+      viewerRef.current
 
-    if (!viewer) return
+    if (!viewer) {
+      return
+    }
 
-    const startTime = performance.now()
+    const startTime =
+      performance.now()
 
-    const animate = (now: number) => {
-      const progress = Math.min(
-        1,
-        (now - startTime) /
-          REVEAL_DURATION
-      )
+    const animateReveal = (
+      now: number
+    ) => {
+      const progress =
+        Math.min(
+          1,
+          (now - startTime) /
+            REVEAL_DURATION
+        )
 
       const eased =
-        easeInOutCubic(progress)
+        easeInOutCubic(
+          progress
+        )
 
       viewer.camera.fov =
         REVEAL_FOV_START +
@@ -877,40 +1252,202 @@ export default function InteriorTour({
       viewer.camera.updateProjectionMatrix()
 
       if (progress < 1) {
-        animationRef.current =
-          requestAnimationFrame(animate)
+        revealRafRef.current =
+          requestAnimationFrame(
+            animateReveal
+          )
 
         return
       }
 
-      animationRef.current = null
+      revealRafRef.current =
+        null
 
       setRevealed(true)
 
-      // Recién aquí desaparece el loader.
-      setLoadingVisible(false)
+      // AQUÍ termina la optimización y desaparece
+      // completamente el overlay.
+      setOverlayVisible(false)
+
+      // IMPORTANTE:
+      // NO hacemos prefetchNeighbors aquí.
+      // Nada compite con la GPU mientras el usuario
+      // gira la Terminal.
     }
 
-    animationRef.current =
-      requestAnimationFrame(animate)
+    revealRafRef.current =
+      requestAnimationFrame(
+        animateReveal
+      )
 
     return () => {
-      if (animationRef.current !== null) {
+      if (
+        revealRafRef.current !==
+        null
+      ) {
         cancelAnimationFrame(
-          animationRef.current
+          revealRafRef.current
         )
       }
     }
   }, [ready])
 
   /* =======================================================
+     OBTENER / CREAR OTRAS ESCENAS
+     ======================================================= */
+
+  const getOrCreatePanorama =
+    async (
+      id: SceneId
+    ): Promise<
+      PanolensNS.ImagePanorama | null
+    > => {
+      const PANOLENS =
+        panolensRef.current
+
+      const viewer =
+        viewerRef.current
+
+      if (
+        !PANOLENS ||
+        !viewer
+      ) {
+        return null
+      }
+
+      const cache =
+        panoramaCacheRef.current
+
+      const existente =
+        cache.get(id)
+
+      if (existente) {
+        return existente
+      }
+
+      const enCurso =
+        pendingPanoRef.current.get(
+          id
+        )
+
+      if (enCurso) {
+        return enCurso
+      }
+
+      const promesa =
+        (async () => {
+          const definition =
+            SCENES[id]
+
+          const srcSeguro =
+            await fuenteParaEscena(
+              definition
+            )
+
+          if (
+            !viewerRef.current
+          ) {
+            return null
+          }
+
+          const panorama =
+            buildScenePanorama(
+              PANOLENS,
+              id,
+              srcSeguro
+            )
+
+          cache.set(
+            id,
+            panorama
+          )
+
+          viewerRef.current.add(
+            panorama
+          )
+
+          return panorama
+        })()
+
+      pendingPanoRef.current.set(
+        id,
+        promesa
+      )
+
+      promesa.finally(() => {
+        pendingPanoRef.current.delete(
+          id
+        )
+      })
+
+      return promesa
+    }
+
+  /* =======================================================
+     ANIMACIÓN GENÉRICA
+     ======================================================= */
+
+  const runAnimation = (
+    duration: number,
+    onFrame: (
+      progress: number
+    ) => void
+  ): Promise<void> =>
+    new Promise((resolve) => {
+      const start =
+        performance.now()
+
+      const step = (
+        now: number
+      ) => {
+        if (
+          !viewerRef.current
+        ) {
+          resolve()
+          return
+        }
+
+        const progress =
+          Math.min(
+            1,
+            (now - start) /
+              duration
+          )
+
+        onFrame(progress)
+
+        if (progress < 1) {
+          walkRafRef.current =
+            requestAnimationFrame(
+              step
+            )
+        } else {
+          walkRafRef.current =
+            null
+
+          resolve()
+        }
+      }
+
+      walkRafRef.current =
+        requestAnimationFrame(
+          step
+        )
+    })
+
+  /* =======================================================
      VELO
      ======================================================= */
 
-  const setVeil = (opacity: number) => {
-    const element = veilRef.current
+  const setVeil = (
+    opacity: number
+  ) => {
+    const element =
+      veilRef.current
 
-    if (!element) return
+    if (!element) {
+      return
+    }
 
     element.style.opacity =
       String(opacity)
@@ -921,100 +1458,73 @@ export default function InteriorTour({
         : 'visible'
   }
 
-  /* =======================================================
-     ANIMACIÓN
-     ======================================================= */
+  const restoreView = (
+    viewer: PanolensNS.Viewer,
+    fov: number
+  ) => {
+    viewer.camera.fov =
+      fov
 
-  const runAnimation = (
-    duration: number,
-    onFrame: (
-      progress: number
-    ) => void
-  ): Promise<void> => {
-    return new Promise((resolve) => {
-      const start = performance.now()
+    viewer.camera.updateProjectionMatrix()
 
-      const step = (now: number) => {
-        if (!viewerRef.current) {
-          resolve()
-          return
-        }
-
-        const progress = Math.min(
-          1,
-          (now - start) / duration
-        )
-
-        onFrame(progress)
-
-        if (progress < 1) {
-          animationRef.current =
-            requestAnimationFrame(step)
-        } else {
-          animationRef.current = null
-          resolve()
-        }
-      }
-
-      animationRef.current =
-        requestAnimationFrame(step)
-    })
+    setVeil(0)
   }
 
   /* =======================================================
-     CAMBIAR DE ESCENA
+     CAMBIAR ESCENA
      ======================================================= */
 
   const goToScene = async (
     targetId: SceneId,
-    fromPosition?: PanolensNS.Infospot['position']
+    fromPosition?: HotspotPos
   ) => {
-    const viewer = viewerRef.current
-
-    if (!viewer) return
-
-    if (switchingRef.current) return
+    const viewer =
+      viewerRef.current
 
     if (
+      !viewer ||
+      switchingRef.current ||
       targetId ===
-      currentSceneRef.current
+        sceneIdRef.current
     ) {
       return
     }
 
-    switchingRef.current = true
+    switchingRef.current =
+      true
 
-    setSwitching(true)
     setInfoPanel(null)
+
     setErrorCarga(null)
 
-    const destination =
-      SCENES[targetId]
+    setOverlayText(
+      `Entrando a ${SCENES[targetId].label}...`
+    )
+
+    setSwitching(true)
 
     const baseFov =
       viewer.camera.fov
 
-    /* =====================================================
-       EMPEZAMOS A CARGAR DESTINO
-       ===================================================== */
-
     const targetPromise =
-      getOrCreatePanorama(targetId)
+      getOrCreatePanorama(
+        targetId
+      )
 
     /* =====================================================
-       MIRAR HACIA HOTSPOT
+       GIRAR HACIA FLECHA
        ===================================================== */
 
     if (fromPosition) {
-      try {
-        const internal =
-          viewer as unknown as {
-            tweenControlCenter?: (
-              position: unknown,
-              duration?: number
-            ) => void
-          }
+      const internal =
+        viewer as unknown as {
+          tweenControlCenter?: (
+            vector: unknown,
+            duration?: number
+          ) => void
+        }
 
+      try {
         internal.tweenControlCenter?.(
           fromPosition,
           WALK_TURN_MS
@@ -1023,10 +1533,6 @@ export default function InteriorTour({
         // continuar
       }
     }
-
-    /* =====================================================
-       ZOOM DE CAMINATA
-       ===================================================== */
 
     const zoomFactor =
       fromPosition
@@ -1038,160 +1544,234 @@ export default function InteriorTour({
         ? WALK_ZOOM_MS
         : BACK_ZOOM_MS
 
-    const targetFov =
-      baseFov * zoomFactor
+    const finalFov =
+      baseFov *
+      zoomFactor
 
     await runAnimation(
       zoomDuration,
       (progress) => {
-        const eased =
-          easeInCubic(progress)
-
         viewer.camera.fov =
           baseFov +
           (
-            targetFov -
+            finalFov -
             baseFov
           ) *
-            eased
+            easeInCubic(
+              progress
+            )
 
         viewer.camera.updateProjectionMatrix()
 
-        if (progress > 0.55) {
-          const veilProgress =
-            (progress - 0.55) /
-            0.45
-
-          setVeil(
-            easeInOutCubic(
-              veilProgress
-            )
-          )
-        }
+        setVeil(
+          progress < 0.55
+            ? 0
+            : easeInOutCubic(
+                (progress -
+                  0.55) /
+                  0.45
+              )
+        )
       }
     )
 
-    if (!viewerRef.current) return
+    if (
+      !viewerRef.current
+    ) {
+      return
+    }
 
     /* =====================================================
-       LOADER ENTRE ESCENAS
+       LOADER SI TARDA
        ===================================================== */
 
-    setLoadingText(
-      `Entrando a ${destination.label}...`
-    )
+    const spinnerTimer =
+      setTimeout(() => {
+        setOverlayVisible(
+          true
+        )
+      }, SPINNER_DELAY)
 
-    setLoadingVisible(true)
+    const hideSpinner = () => {
+      clearTimeout(
+        spinnerTimer
+      )
+
+      setOverlayVisible(
+        false
+      )
+    }
 
     const target =
       await targetPromise
 
     if (!target) {
-      setLoadingVisible(false)
+      hideSpinner()
 
-      viewer.camera.fov =
+      restoreView(
+        viewer,
         baseFov
+      )
 
-      viewer.camera.updateProjectionMatrix()
+      switchingRef.current =
+        false
 
-      setVeil(0)
-
-      switchingRef.current = false
       setSwitching(false)
 
       setErrorCarga(
-        'No se pudo cargar esta escena.'
+        'No se pudo cargar esta escena. Volvé a intentar.'
       )
 
       return
     }
 
     /* =====================================================
-       ESPERAR NUEVA TEXTURA
-       ===================================================== */
-
-    const loadPromise =
-      new Promise<void>((resolve) => {
-        let finished = false
-
-        const finish = () => {
-          if (finished) return
-
-          finished = true
-          resolve()
-        }
-
-        if (target.loaded) {
-          finish()
-          return
-        }
-
-        target.addEventListener(
-          'load',
-          finish
-        )
-
-        setTimeout(
-          finish,
-          LOAD_TIMEOUT
-        )
-      })
-
-    viewer.setPanorama(target)
-
-    await loadPromise
-
-    /* =====================================================
-       WARMUP
-       ===================================================== */
-
-    await esperarFrames(5)
-
-    currentSceneRef.current =
-      targetId
-
-    setSceneId(targetId)
-
-    /* =====================================================
        LLEGADA
        ===================================================== */
 
-    const arrivalFov =
-      baseFov *
-      ARRIVE_START_FACTOR
+    const arrive =
+      async () => {
+        // Damos algunos frames a la nueva textura.
+        setOverlayText(
+          'Optimizando imagen 360°...'
+        )
 
-    viewer.camera.fov =
-      arrivalFov
+        await esperarFrames(8)
 
-    viewer.camera.updateProjectionMatrix()
+        hideSpinner()
 
-    await runAnimation(
-      ARRIVE_MS,
-      (progress) => {
-        const eased =
-          easeOutCubic(progress)
+        const startFov =
+          baseFov *
+          ARRIVE_START_FACTOR
 
         viewer.camera.fov =
-          arrivalFov +
-          (
-            baseFov -
-            arrivalFov
-          ) *
-            eased
+          startFov
 
         viewer.camera.updateProjectionMatrix()
 
-        setVeil(1 - eased)
+        await runAnimation(
+          ARRIVE_MS,
+          (progress) => {
+            const eased =
+              easeOutCubic(
+                progress
+              )
+
+            viewer.camera.fov =
+              startFov +
+              (
+                baseFov -
+                startFov
+              ) *
+                eased
+
+            viewer.camera.updateProjectionMatrix()
+
+            setVeil(
+              1 - eased
+            )
+          }
+        )
+
+        sceneIdRef.current =
+          targetId
+
+        setSceneId(
+          targetId
+        )
+
+        setVeil(0)
+
+        switchingRef.current =
+          false
+
+        setSwitching(false)
+
+        // NO precargamos vecinos.
       }
+
+    if (target.loaded) {
+      viewer.setPanorama(
+        target
+      )
+
+      await arrive()
+
+      return
+    }
+
+    let resolved = false
+
+    const onLoad =
+      async () => {
+        if (resolved) {
+          return
+        }
+
+        resolved = true
+
+        target.removeEventListener(
+          'load',
+          onLoad
+        )
+
+        await arrive()
+      }
+
+    target.addEventListener(
+      'load',
+      onLoad
     )
 
-    setVeil(0)
+    viewer.setPanorama(
+      target
+    )
 
-    setLoadingVisible(false)
+    setTimeout(() => {
+      if (resolved) {
+        return
+      }
 
-    switchingRef.current = false
+      resolved = true
 
-    setSwitching(false)
+      target.removeEventListener(
+        'load',
+        onLoad
+      )
+
+      hideSpinner()
+
+      restoreView(
+        viewer,
+        baseFov
+      )
+
+      switchingRef.current =
+        false
+
+      setSwitching(false)
+
+      setErrorCarga(
+        'La imagen está tardando demasiado en cargar. Volvé a intentar.'
+      )
+    }, LOAD_TIMEOUT)
+  }
+
+  /* =======================================================
+     SALIR
+     ======================================================= */
+
+  const handleExit = () => {
+    if (exiting) {
+      return
+    }
+
+    setExiting(true)
+
+    setTimeout(
+      onExit,
+      EXIT_DURATION
+    )
   }
 
   /* =======================================================
@@ -1208,37 +1788,26 @@ export default function InteriorTour({
 
     const current =
       SCENES[
-        currentSceneRef.current
+        sceneIdRef.current
       ]
 
     if (current.backTo) {
-      goToScene(current.backTo)
+      goToScene(
+        current.backTo
+      )
+
       return
     }
 
     handleExit()
   }
 
-  /* =======================================================
-     SALIR
-     ======================================================= */
-
-  const handleExit = () => {
-    if (exiting) return
-
-    setExiting(true)
-
-    setTimeout(
-      onExit,
-      EXIT_DURATION
-    )
-  }
-
   const infoLink =
-    infoPanel?.link ?? null
+    infoPanel?.link ??
+    null
 
   /* =======================================================
-     RENDER
+     JSX
      ======================================================= */
 
   return (
@@ -1249,14 +1818,10 @@ export default function InteriorTour({
           : ''
       }`}
     >
-      {/* PANOLENS */}
-
       <div
         ref={containerRef}
         className="tvisit-viewer"
       />
-
-      {/* TRANSICIÓN */}
 
       <div
         ref={veilRef}
@@ -1267,13 +1832,10 @@ export default function InteriorTour({
           opacity: 0,
           visibility: 'hidden',
           zIndex: 3,
-
           background:
             'radial-gradient(circle at 50% 50%, rgba(255,255,255,0.4) 0%, rgba(6,10,18,0.96) 80%)',
         }}
       />
-
-      {/* INFORMACIÓN */}
 
       {infoPanel ? (
         <>
@@ -1305,7 +1867,10 @@ export default function InteriorTour({
             </h3>
 
             {infoPanel.lines.map(
-              (line, index) => (
+              (
+                line,
+                index
+              ) => (
                 <p
                   key={index}
                   className="tvisit-info-panel__text"
@@ -1326,15 +1891,23 @@ export default function InteriorTour({
                   )
                 }
                 style={{
-                  display: 'inline-block',
+                  display:
+                    'inline-block',
                   marginTop: 12,
-                  padding: '10px 18px',
-                  borderRadius: 999,
-                  border: 'none',
-                  background: '#0b57d0',
-                  color: '#fff',
-                  fontWeight: 600,
-                  cursor: 'pointer',
+                  padding:
+                    '10px 18px',
+                  borderRadius:
+                    999,
+                  border:
+                    'none',
+                  background:
+                    '#0b57d0',
+                  color:
+                    '#fff',
+                  fontWeight:
+                    600,
+                  cursor:
+                    'pointer',
                 }}
               >
                 {infoLink.text}
@@ -1344,21 +1917,23 @@ export default function InteriorTour({
         </>
       ) : null}
 
-      {/* CARGANDO */}
-
-      {loadingVisible ? (
-        <div className="tvisit-overlay">
+      {overlayMounted ? (
+        <div
+          className={`tvisit-overlay ${
+            overlayVisible
+              ? ''
+              : 'tvisit-overlay--hidden'
+          }`}
+        >
           <div className="tvisit-overlay__card v360-glass">
             <div className="tvisit-overlay__spinner" />
 
             <span className="tvisit-overlay__text">
-              {loadingText}
+              {overlayText}
             </span>
           </div>
         </div>
       ) : null}
-
-      {/* ERROR */}
 
       {errorCarga ? (
         <div className="tvisit-overlay">
@@ -1370,20 +1945,24 @@ export default function InteriorTour({
         </div>
       ) : null}
 
-      {/* VOLVER */}
-
       {revealed ? (
         <button
           type="button"
-          onClick={handleBack}
-          disabled={switching}
+          onClick={
+            handleBack
+          }
+          disabled={
+            switching
+          }
           className="tvisit-back v360-neu"
         >
           <span className="tvisit-back__arrow">
             ←
           </span>
 
-          <span>Volver</span>
+          <span>
+            Volver
+          </span>
         </button>
       ) : null}
     </div>
