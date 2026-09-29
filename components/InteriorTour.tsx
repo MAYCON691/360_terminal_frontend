@@ -45,6 +45,9 @@ interface SceneDef {
   arrows: ArrowHotspot[]
   infos: InfoHotspot[]
   maxTextureDim?: number
+  // true = método "original seguro" (solo la foto de dron).
+  // false/undefined = método HD con nitidez (todas las demás).
+  usarOriginal?: boolean
 }
 
 type PanoEvents = {
@@ -59,11 +62,11 @@ type PanoEvents = {
 const SCENES: Record<SceneId, SceneDef> = {
   terminal: {
     id: 'terminal',
-    // IMPORTANTE: en producción (Linux) importan las mayúsculas.
-    // Esta es la extensión que funcionaba: .jpg en minúscula.
+    // En producción (Linux) importan las mayúsculas.
     src: '/DJI_085511.jpg',
     label: 'Terminal Metropolitana',
     backTo: null,
+    usarOriginal: true,
     maxTextureDim: 4096,
     arrows: [
       { to: 'metroarena', position: [3534.34, -344.61, 3507.92], size: 220, label: 'METRO ARENA' },
@@ -200,19 +203,16 @@ const REVEAL_DURATION = 1100
 const MIN_OVERLAY_TIME = 1400
 const EXIT_DURATION = 500
 
-// Tamaño máximo (lado mayor) de textura para cualquier escena
-// que no defina el suyo. Si al girar todavía se siente pesado,
-// bajá TERMINAL_MAX_DIM (en SCENES.terminal.maxTextureDim) a 3072 o 2560.
+// Tamaño de textura de las escenas HD (todas menos la terminal).
+// Se llevan a este tamaño (agrandando o reduciendo) con suavizado alto.
 const MAX_TEXTURE_DIM = 4096
 
-// Tiempo máximo esperando que la textura termine de cargar en el visor.
-const LOAD_TIMEOUT = 25000
+// Intensidad de la nitidez de las escenas HD (0.3–0.5 recomendado).
+const SHARPEN_AMOUNT = 0.4
 
-// Tiempo máximo de descarga de cada archivo.
+const LOAD_TIMEOUT = 25000
 const FETCH_TIMEOUT = 45000
 
-// Calentamiento de GPU: se renderizan frames MIENTRAS el loader
-// sigue visible, para que al girar no haya tirones.
 const WARMUP_FRAMES = 40
 const WARMUP_MAX_MS = 4000
 
@@ -277,7 +277,6 @@ function esperarFrames(n: number, maxMs: number = WARMUP_MAX_MS): Promise<void> 
 
 /* =========================================================
    ESPERAR QUE UN PANORAMA CARGUE
-   true = cargó, false = error o tiempo agotado
    ========================================================= */
 
 function esperarCargaPanorama(
@@ -361,10 +360,7 @@ function limiteTexturaDispositivo(): number {
 }
 
 /* =========================================================
-   CANDIDATOS DE URL
-   Linux distingue mayúsculas/minúsculas. Si el archivo no
-   existe con el nombre exacto, probamos con la otra variante
-   de la extensión (.jpg <-> .JPG).
+   CANDIDATOS DE URL (.jpg <-> .JPG)
    ========================================================= */
 
 function candidatosUrl(src: string): string[] {
@@ -374,23 +370,8 @@ function candidatosUrl(src: string): string[] {
 
   if (match) {
     const base = match[1]
-    const ext = match[2]
 
-    const variantes = [
-      `${base}.jpg`,
-      `${base}.JPG`,
-      `${base}.jpeg`,
-      `${base}.JPEG`,
-    ]
-
-    variantes.forEach((v) => {
-      if (v !== src && v.toLowerCase() !== ext && !lista.includes(v)) {
-        lista.push(v)
-      }
-    })
-
-    // Aseguramos las dos variantes principales
-    ;[`${base}.jpg`, `${base}.JPG`].forEach((v) => {
+    ;[`${base}.jpg`, `${base}.JPG`, `${base}.jpeg`, `${base}.JPEG`].forEach((v) => {
       if (!lista.includes(v)) lista.push(v)
     })
   }
@@ -399,7 +380,114 @@ function candidatosUrl(src: string): string[] {
 }
 
 /* =========================================================
-   DESCARGA CON PROGRESO, TIMEOUT Y VARIANTES DE NOMBRE
+   NITIDEZ (modo HD)
+   ========================================================= */
+
+function aplicarNitidez(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  amount: number
+) {
+  const imageData = ctx.getImageData(0, 0, width, height)
+  const src = imageData.data
+  const copia = new Uint8ClampedArray(src)
+  const centro = 1 + 4 * amount
+  const stride = width * 4
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const index = y * stride + x * 4
+
+      for (let channel = 0; channel < 3; channel++) {
+        const k = index + channel
+
+        src[k] =
+          copia[k] * centro -
+          amount *
+            (copia[k - 4] + copia[k + 4] + copia[k - stride] + copia[k + stride])
+      }
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0)
+}
+
+/* =========================================================
+   CARGAR UNA IMAGEN PROBANDO VARIANTES DE NOMBRE
+   ========================================================= */
+
+function cargarImagen(url: string): Promise<HTMLImageElement | null> {
+  return new Promise((resolve) => {
+    const img = new Image()
+
+    img.crossOrigin = 'anonymous'
+
+    img.onload = () => resolve(img)
+    img.onerror = () => resolve(null)
+
+    img.src = url
+  })
+}
+
+/* =========================================================
+   FUENTE HD (todas las escenas excepto la terminal)
+   - lleva la imagen a MAX_TEXTURE_DIM (agranda o reduce)
+   - suavizado de alta calidad
+   - filtro de nitidez
+   Si algo falla, devuelve la original.
+   ========================================================= */
+
+async function prepararFuenteHD(
+  src: string,
+  maxDim: number = MAX_TEXTURE_DIM
+): Promise<string> {
+  try {
+    let img: HTMLImageElement | null = null
+
+    for (const url of candidatosUrl(src)) {
+      img = await cargarImagen(url)
+      if (img) break
+    }
+
+    if (!img) {
+      return src
+    }
+
+    const escala = maxDim / Math.max(img.width, img.height)
+
+    const canvas = document.createElement('canvas')
+
+    canvas.width = Math.max(1, Math.floor(img.width * escala))
+    canvas.height = Math.max(1, Math.floor(img.height * escala))
+
+    const ctx = canvas.getContext('2d')
+
+    if (!ctx) {
+      return src
+    }
+
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+
+    aplicarNitidez(ctx, canvas.width, canvas.height, SHARPEN_AMOUNT)
+
+    return await new Promise<string>((resolve) => {
+      canvas.toBlob(
+        (blob) => resolve(blob ? URL.createObjectURL(blob) : src),
+        'image/jpeg',
+        0.92
+      )
+    })
+  } catch {
+    return src
+  }
+}
+
+/* =========================================================
+   DESCARGA CON PROGRESO (solo foto de dron)
    ========================================================= */
 
 async function descargarUno(
@@ -469,10 +557,9 @@ async function descargarBlob(
 }
 
 /* =========================================================
-   PREPARAR IMAGEN
-   - descarga (con variantes de nombre)
-   - decodifica
-   - reduce con canvas si supera el tamaño máximo
+   IMAGEN ORIGINAL SEGURA (solo foto de dron)
+   - descarga, decodifica, reduce con canvas si excede el máximo
+   - sin nitidez
    Devuelve null si el archivo no existe.
    ========================================================= */
 
@@ -514,7 +601,6 @@ async function prepararImagen(
 
     const ladoMayor = Math.max(width, height)
 
-    // Si ya entra dentro del límite, usamos el archivo tal cual.
     if (!ladoMayor || ladoMayor <= limite) {
       return objectUrl
     }
@@ -560,8 +646,9 @@ async function prepararImagen(
 
 /* =========================================================
    FUENTE DE CADA ESCENA
-   nivel 0 = tamaño normal de la escena
-   nivel 1 = reducida a 2048 (plan B si la GPU no aguanta)
+   - terminal (usarOriginal): método seguro, sin nitidez
+     nivel 1 = plan B reducido a 2048
+   - resto: método HD con nitidez
    ========================================================= */
 
 function fuenteParaEscena(
@@ -569,9 +656,13 @@ function fuenteParaEscena(
   nivel: number = 0,
   onProgress?: (pct: number | null) => void
 ): Promise<string | null> {
-  const dim = nivel >= 1 ? 2048 : definition.maxTextureDim ?? MAX_TEXTURE_DIM
+  if (definition.usarOriginal) {
+    const dim = nivel >= 1 ? 2048 : definition.maxTextureDim ?? MAX_TEXTURE_DIM
 
-  return prepararImagen(definition.src, dim, onProgress)
+    return prepararImagen(definition.src, dim, onProgress)
+  }
+
+  return prepararFuenteHD(definition.src, definition.maxTextureDim ?? MAX_TEXTURE_DIM)
 }
 
 /* =========================================================
@@ -792,7 +883,6 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
 
           if (cancelled) return
 
-          // null = el archivo no existe en el servidor (ni con otra capitalización)
           if (!srcSeguro) {
             setOverlayVisible(false)
             setErrorFatal(true)
@@ -849,8 +939,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
 
         panoramaCacheRef.current.set(START_SCENE, primera)
 
-        // Calentamiento: renderiza frames con el loader todavía encima
-        // para que la textura ya esté en la GPU cuando el usuario gire.
+        // Calentamiento con el loader todavía encima
         setOverlayText(TEXTO_OPTIMIZANDO)
 
         await esperarFrames(WARMUP_FRAMES, WARMUP_MAX_MS)
@@ -1173,7 +1262,6 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
       return
     }
 
-    // Calentamiento de la nueva textura con la pantalla todavía oscura
     setOverlayText(TEXTO_OPTIMIZANDO)
 
     await esperarFrames(20, 1500)
