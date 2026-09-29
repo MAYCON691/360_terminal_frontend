@@ -57,9 +57,15 @@ interface Vista360Props {
    * lógica del planeta.
    */
   onModeChange?: (mode: 'planet' | 'entered') => void
+  /**
+   * CAMBIO: si es true, el loop de WebGL deja de dibujar. Se usa mientras
+   * está abierto el recorrido interior (panolens), para que este shader —que
+   * es pesado— no siga corriendo a 60 fps detrás y compitiendo por la GPU.
+   */
+  paused?: boolean
 }
 
-export default function Vista360({ src = '/DJI_0855.jpg', onModeChange }: Vista360Props) {
+export default function Vista360({ src = '/DJI_0855.jpg', onModeChange, paused = false }: Vista360Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const [loading, setLoading] = useState(true)
@@ -82,6 +88,15 @@ export default function Vista360({ src = '/DJI_0855.jpg', onModeChange }: Vista3
 
   const isDraggingRef = useRef(false)
   const lastPointerRef = useRef({ x: 0, y: 0 })
+
+  // CAMBIO: espejo de la prop "paused" para poder leerlo dentro del loop de
+  // requestAnimationFrame sin volver a crear el loop.
+  const pausedRef = useRef(false)
+  useEffect(() => {
+    pausedRef.current = paused
+    // Evita un salto de tiempo enorme (dt) al reanudar después de la pausa.
+    lastFrameTimeRef.current = null
+  }, [paused])
 
   const VERT_SRC = `
     attribute vec2 aPosition;
@@ -287,6 +302,13 @@ export default function Vista360({ src = '/DJI_0855.jpg', onModeChange }: Vista3
       buttonTimerRef.current = setTimeout(() => setShowEnterButton(true), SHOW_BUTTON_DELAY)
 
       const loop = (time: number) => {
+        // CAMBIO: en pausa no calculamos ni dibujamos nada (casi no consume
+        // GPU), pero seguimos "escuchando" para reanudar apenas se despause.
+        if (pausedRef.current) {
+          rafIdRef.current = requestAnimationFrame(loop)
+          return
+        }
+
         if (lastFrameTimeRef.current == null) lastFrameTimeRef.current = time
         const dt = time - lastFrameTimeRef.current
         lastFrameTimeRef.current = time
@@ -319,6 +341,8 @@ export default function Vista360({ src = '/DJI_0855.jpg', onModeChange }: Vista3
   // segundo, sin interferir con el loop de WebGL (que corre aparte). ----
   useEffect(() => {
     const id = setInterval(() => {
+      // CAMBIO: en pausa no actualizamos el estado (evita re-renders inútiles).
+      if (pausedRef.current) return
       const deg = ((rotationRef.current.yaw * 180) / Math.PI) % 360
       setYawDisplayDeg(deg < 0 ? deg + 360 : deg)
     }, 150)
@@ -479,7 +503,7 @@ export default function Vista360({ src = '/DJI_0855.jpg', onModeChange }: Vista3
 
       {/* Botón "INGRESAR" */}
       {showEnterButton && !morphing ? (
-        <button onClick={handleEnter} className="v360-cta v360-glass">
+        <button onClick={handleEnter} className="v360-cta v360-cta--neu-white">
           <span>INGRESAR</span>
           <span className="v360-cta__arrow">→</span>
         </button>
