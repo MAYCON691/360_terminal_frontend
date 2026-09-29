@@ -52,6 +52,11 @@ interface SceneDef {
   usarOriginal?: boolean
 }
 
+type PanoEvents = {
+  addEventListener: (type: string, cb: (e?: unknown) => void) => void
+  removeEventListener: (type: string, cb: (e?: unknown) => void) => void
+}
+
 /* =========================================================
    ESCENAS
    ========================================================= */
@@ -62,14 +67,9 @@ const SCENES: Record<SceneId, SceneDef> = {
     src: '/DJI_085511.JPG',
     label: 'Terminal Metropolitana',
     backTo: null,
-
-    // IMPORTANTE:
-    // Conservamos exactamente el método que ya funciona
-    // correctamente en producción.
     usarOriginal: true,
     maxTextureDim: 4096,
     skipSharpen: true,
-
     arrows: [
       {
         to: 'metroarena',
@@ -102,7 +102,6 @@ const SCENES: Record<SceneId, SceneDef> = {
         label: 'HELIPUERTO',
       },
     ],
-
     infos: [],
   },
 
@@ -111,9 +110,7 @@ const SCENES: Record<SceneId, SceneDef> = {
     src: '/METROARENA1.JPG',
     label: 'Metro Arena',
     backTo: 'terminal',
-
     arrows: [],
-
     infos: [
       {
         position: [4744.73, -1362.31, 728.25],
@@ -142,7 +139,6 @@ const SCENES: Record<SceneId, SceneDef> = {
     src: '/PUERTA_PRINCIPAL.jpg',
     label: 'Ingreso Principal',
     backTo: 'terminal',
-
     arrows: [
       {
         to: 'patiocomidas2',
@@ -151,7 +147,6 @@ const SCENES: Record<SceneId, SceneDef> = {
         label: 'PATIO DE COMIDAS',
       },
     ],
-
     infos: [
       {
         position: [3872.03, 278.91, -3135.24],
@@ -174,7 +169,6 @@ const SCENES: Record<SceneId, SceneDef> = {
     src: '/PUERTA_3.jpg',
     label: 'Ingreso 3',
     backTo: 'terminal',
-
     arrows: [
       {
         to: 'ascensor',
@@ -183,7 +177,6 @@ const SCENES: Record<SceneId, SceneDef> = {
         label: 'ENTRAR A ASCENSOR',
       },
     ],
-
     infos: [],
   },
 
@@ -201,7 +194,6 @@ const SCENES: Record<SceneId, SceneDef> = {
     src: '/ASCENSOR.jpg',
     label: 'Ascensor',
     backTo: 'puerta3',
-
     arrows: [
       {
         to: 'piso3',
@@ -222,7 +214,6 @@ const SCENES: Record<SceneId, SceneDef> = {
         label: 'PLANTA BAJA',
       },
     ],
-
     infos: [],
   },
 
@@ -264,27 +255,26 @@ const REVEAL_FOV_START = 18
 const REVEAL_FOV_END = 65
 const REVEAL_DURATION = 1100
 
-// Dejamos visible el loader un poco más.
 const MIN_OVERLAY_TIME = 1400
-
 const EXIT_DURATION = 500
 
 const MAX_TEXTURE_DIM = 4096
-const LOAD_TIMEOUT = 15000
+
+// Tiempo máximo esperando que una textura termine de cargar
+// (después de haber descargado el archivo).
+const LOAD_TIMEOUT = 20000
+
+// Tiempo máximo de descarga del archivo original.
+const FETCH_TIMEOUT = 45000
 
 const SHARPEN_AMOUNT = 0.4
 const ENABLE_SHARPEN = false
 
-// IMPORTANTE:
-// Antes estaba en 5.
-// Ahora damos más tiempo para que WebGL/GPU termine
-// de estabilizar la textura antes de mostrarla.
+// Frames de calentamiento, pero con tope de tiempo
+// para que nunca se quede colgado.
 const WARMUP_FRAMES = 30
+const WARMUP_MAX_MS = 1500
 
-// IMPORTANTE:
-// Antes estaba en 2.
-// Un iPhone con DPR 3 o una pantalla Retina genera muchísimo
-// trabajo. Lo dejamos en 1 para priorizar fluidez.
 const MAX_PIXEL_RATIO = 1
 
 const WALK_TURN_MS = 700
@@ -304,29 +294,35 @@ const SPINNER_DELAY = 400
    ========================================================= */
 
 const easeInOutCubic = (x: number) =>
-  x < 0.5
-    ? 4 * x * x * x
-    : 1 - Math.pow(-2 * x + 2, 3) / 2
+  x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2
 
-const easeInCubic = (x: number) =>
-  x * x * x
+const easeInCubic = (x: number) => x * x * x
 
-const easeOutCubic = (x: number) =>
-  1 - Math.pow(1 - x, 3)
+const easeOutCubic = (x: number) => 1 - Math.pow(1 - x, 3)
 
 /* =========================================================
-   ESPERAR FRAMES
+   ESPERAR FRAMES (con tope de tiempo)
    ========================================================= */
 
-function esperarFrames(n: number): Promise<void> {
+function esperarFrames(n: number, maxMs: number = WARMUP_MAX_MS): Promise<void> {
   return new Promise((resolve) => {
     let restantes = n
+    let terminado = false
+
+    const terminar = () => {
+      if (terminado) return
+      terminado = true
+      clearTimeout(timer)
+      resolve()
+    }
+
+    const timer = setTimeout(terminar, maxMs)
 
     const paso = () => {
+      if (terminado) return
       restantes -= 1
-
       if (restantes <= 0) {
-        resolve()
+        terminar()
       } else {
         requestAnimationFrame(paso)
       }
@@ -337,42 +333,88 @@ function esperarFrames(n: number): Promise<void> {
 }
 
 /* =========================================================
+   ESPERAR QUE UN PANORAMA CARGUE (robusto)
+   - resuelve true si cargó
+   - resuelve false si dio error o se agotó el tiempo
+   ========================================================= */
+
+function esperarCargaPanorama(
+  pano: PanolensNS.ImagePanorama,
+  timeoutMs: number
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const target = pano as unknown as PanoEvents & { loaded?: boolean }
+
+    if (target.loaded) {
+      resolve(true)
+      return
+    }
+
+    let terminado = false
+
+    const limpiar = () => {
+      terminado = true
+      clearTimeout(timer)
+      clearInterval(poll)
+      target.removeEventListener('load', onLoad)
+      target.removeEventListener('error', onError)
+    }
+
+    const onLoad = () => {
+      if (terminado) return
+      limpiar()
+      resolve(true)
+    }
+
+    const onError = () => {
+      if (terminado) return
+      limpiar()
+      resolve(false)
+    }
+
+    const timer = setTimeout(() => {
+      if (terminado) return
+      limpiar()
+      resolve(!!target.loaded)
+    }, timeoutMs)
+
+    // Por si el evento 'load' se dispara antes de que escuchemos
+    // o nunca se dispara aunque la textura sí esté lista.
+    const poll = setInterval(() => {
+      if (terminado) return
+      if (target.loaded) {
+        limpiar()
+        resolve(true)
+      }
+    }, 200)
+
+    target.addEventListener('load', onLoad)
+    target.addEventListener('error', onError)
+  })
+}
+
+/* =========================================================
    LÍMITE DE TEXTURA DEL DISPOSITIVO
    ========================================================= */
 
 function limiteTexturaDispositivo(): number {
   try {
-    const canvas =
-      document.createElement('canvas')
+    const canvas = document.createElement('canvas')
 
-    const gl = (
-      canvas.getContext('webgl') ||
-      canvas.getContext('experimental-webgl')
-    ) as WebGLRenderingContext | null
+    const gl = (canvas.getContext('webgl') ||
+      canvas.getContext('experimental-webgl')) as WebGLRenderingContext | null
 
-    const maxGpu = gl
-      ? (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number)
-      : 4096
+    const maxGpu = gl ? (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number) : 4096
 
     const ua = navigator.userAgent
 
     const esIOS =
       /iPhone|iPad|iPod/.test(ua) ||
-      (
-        navigator.platform === 'MacIntel' &&
-        navigator.maxTouchPoints > 1
-      )
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 
-    const limiteSistema =
-      esIOS ? 4096 : 8192
+    const limiteSistema = esIOS ? 4096 : 8192
 
-    return Math.max(
-      2048,
-      Math.min(
-        maxGpu,
-        limiteSistema
-      )
-    )
+    return Math.max(2048, Math.min(maxGpu, limiteSistema))
   } catch {
     return 4096
   }
@@ -388,77 +430,41 @@ function aplicarNitidez(
   height: number,
   amount: number
 ) {
-  const imageData =
-    ctx.getImageData(
-      0,
-      0,
-      width,
-      height
-    )
-
+  const imageData = ctx.getImageData(0, 0, width, height)
   const src = imageData.data
+  const copia = new Uint8ClampedArray(src)
+  const centro = 1 + 4 * amount
+  const stride = width * 4
 
-  const copia =
-    new Uint8ClampedArray(src)
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const index = y * stride + x * 4
 
-  const centro =
-    1 + 4 * amount
-
-  const stride =
-    width * 4
-
-  for (
-    let y = 1;
-    y < height - 1;
-    y++
-  ) {
-    for (
-      let x = 1;
-      x < width - 1;
-      x++
-    ) {
-      const index =
-        y * stride +
-        x * 4
-
-      for (
-        let channel = 0;
-        channel < 3;
-        channel++
-      ) {
-        const k =
-          index + channel
+      for (let channel = 0; channel < 3; channel++) {
+        const k = index + channel
 
         const valor =
           copia[k] * centro -
           amount *
-            (
-              copia[k - 4] +
-              copia[k + 4] +
-              copia[k - stride] +
-              copia[k + stride]
-            )
+            (copia[k - 4] + copia[k + 4] + copia[k - stride] + copia[k + stride])
 
         src[k] = valor
       }
     }
   }
 
-  ctx.putImageData(
-    imageData,
-    0,
-    0
-  )
+  ctx.putImageData(imageData, 0, 0)
 }
 
 /* =========================================================
-   PREPARAR FUENTE NORMAL
+   PREPARAR FUENTE NORMAL (reduce con canvas)
    ========================================================= */
 
 function prepararFuenteSegura(
   src: string,
   maxDim: number = MAX_TEXTURE_DIM,
-  sinNitidez: boolean = false
+  sinNitidez: boolean = false,
+  forzarReduccion: boolean = false
 ): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image()
@@ -467,87 +473,39 @@ function prepararFuenteSegura(
 
     img.onload = () => {
       try {
-        const ladoMayor =
-          Math.max(
-            img.width,
-            img.height
-          )
+        const ladoMayor = Math.max(img.width, img.height)
 
-        // MUY IMPORTANTE:
-        // Nunca agrandamos una imagen que ya sea menor.
-        const escala =
-          ladoMayor > maxDim
-            ? maxDim / ladoMayor
-            : 1
+        const escala = ladoMayor > maxDim ? maxDim / ladoMayor : 1
 
-        if (
-          escala === 1 &&
-          (!ENABLE_SHARPEN || sinNitidez)
-        ) {
+        if (escala === 1 && !forzarReduccion && (!ENABLE_SHARPEN || sinNitidez)) {
           resolve(src)
           return
         }
 
-        const canvas =
-          document.createElement('canvas')
+        const canvas = document.createElement('canvas')
 
-        canvas.width =
-          Math.max(
-            1,
-            Math.floor(
-              img.width * escala
-            )
-          )
+        canvas.width = Math.max(1, Math.floor(img.width * escala))
+        canvas.height = Math.max(1, Math.floor(img.height * escala))
 
-        canvas.height =
-          Math.max(
-            1,
-            Math.floor(
-              img.height * escala
-            )
-          )
-
-        const ctx =
-          canvas.getContext('2d')
+        const ctx = canvas.getContext('2d')
 
         if (!ctx) {
           resolve(src)
           return
         }
 
-        ctx.imageSmoothingEnabled =
-          true
+        ctx.imageSmoothingEnabled = true
+        ctx.imageSmoothingQuality = 'high'
 
-        ctx.imageSmoothingQuality =
-          'high'
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
-        ctx.drawImage(
-          img,
-          0,
-          0,
-          canvas.width,
-          canvas.height
-        )
-
-        if (
-          ENABLE_SHARPEN &&
-          !sinNitidez
-        ) {
-          aplicarNitidez(
-            ctx,
-            canvas.width,
-            canvas.height,
-            SHARPEN_AMOUNT
-          )
+        if (ENABLE_SHARPEN && !sinNitidez) {
+          aplicarNitidez(ctx, canvas.width, canvas.height, SHARPEN_AMOUNT)
         }
 
         canvas.toBlob(
           (blob) => {
-            resolve(
-              blob
-                ? URL.createObjectURL(blob)
-                : src
-            )
+            resolve(blob ? URL.createObjectURL(blob) : src)
           },
           'image/jpeg',
           0.92
@@ -566,141 +524,131 @@ function prepararFuenteSegura(
 }
 
 /* =========================================================
-   ORIGINAL SEGURO
+   DESCARGA CON PROGRESO Y TIMEOUT
+   ========================================================= */
 
-   ESTA FUNCIÓN SE MANTIENE PORQUE ES LA QUE YA FUNCIONA
-   EN TU PRODUCCIÓN CON DJI_085511.JPG.
+async function descargarBlob(
+  src: string,
+  onProgress?: (pct: number | null) => void
+): Promise<Blob | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
+
+  try {
+    const response = await fetch(src, {
+      signal: controller.signal,
+      cache: 'force-cache',
+    })
+
+    if (!response.ok) {
+      console.warn('[InteriorTour] fetch no OK:', src, response.status)
+      return null
+    }
+
+    const total = Number(response.headers.get('content-length')) || 0
+
+    if (!response.body || !total) {
+      onProgress?.(null)
+      return await response.blob()
+    }
+
+    const reader = response.body.getReader()
+    const partes: BlobPart[] = []
+    let recibido = 0
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        partes.push(value)
+        recibido += value.length
+        onProgress?.(Math.min(100, Math.round((recibido / total) * 100)))
+      }
+    }
+
+    return new Blob(partes, {
+      type: response.headers.get('content-type') || 'image/jpeg',
+    })
+  } catch (error) {
+    console.warn('[InteriorTour] error descargando:', src, error)
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/* =========================================================
+   ORIGINAL SEGURO
    ========================================================= */
 
 async function prepararOriginalSeguro(
-  src: string
+  src: string,
+  onProgress?: (pct: number | null) => void
 ): Promise<string> {
   try {
-    const response =
-      await fetch(src)
+    const blob = await descargarBlob(src, onProgress)
 
-    if (!response.ok) {
+    if (!blob) {
       return src
     }
 
-    const blob =
-      await response.blob()
+    const objectUrl = URL.createObjectURL(blob)
 
-    const objectUrl =
-      URL.createObjectURL(blob)
-
-    const img =
-      new Image()
+    const img = new Image()
 
     img.src = objectUrl
 
     try {
       await img.decode()
     } catch {
-      await new Promise<void>(
-        (resolve) => {
-          if (img.complete) {
-            resolve()
-          } else {
-            img.onload = () =>
-              resolve()
-
-            img.onerror = () =>
-              resolve()
-          }
+      await new Promise<void>((resolve) => {
+        if (img.complete) {
+          resolve()
+        } else {
+          img.onload = () => resolve()
+          img.onerror = () => resolve()
         }
-      )
+      })
     }
 
-    const width =
-      img.naturalWidth ||
-      img.width
+    const width = img.naturalWidth || img.width
+    const height = img.naturalHeight || img.height
 
-    const height =
-      img.naturalHeight ||
-      img.height
+    const limite = limiteTexturaDispositivo()
 
-    const limite =
-      limiteTexturaDispositivo()
+    const ladoMayor = Math.max(width, height)
 
-    const ladoMayor =
-      Math.max(
-        width,
-        height
-      )
-
-    // Si la imagen original entra dentro del límite,
-    // usamos EXACTAMENTE el original.
-    if (
-      !ladoMayor ||
-      ladoMayor <= limite
-    ) {
+    if (!ladoMayor || ladoMayor <= limite) {
       return objectUrl
     }
 
-    // Solo reducimos si la GPU realmente no soporta
-    // el tamaño original.
-    const escala =
-      limite / ladoMayor
+    const escala = limite / ladoMayor
 
-    const canvas =
-      document.createElement('canvas')
+    const canvas = document.createElement('canvas')
 
-    canvas.width =
-      Math.max(
-        1,
-        Math.floor(
-          width * escala
-        )
-      )
+    canvas.width = Math.max(1, Math.floor(width * escala))
+    canvas.height = Math.max(1, Math.floor(height * escala))
 
-    canvas.height =
-      Math.max(
-        1,
-        Math.floor(
-          height * escala
-        )
-      )
-
-    const ctx =
-      canvas.getContext('2d')
+    const ctx = canvas.getContext('2d')
 
     if (!ctx) {
       return objectUrl
     }
 
-    ctx.imageSmoothingEnabled =
-      true
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
 
-    ctx.imageSmoothingQuality =
-      'high'
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
-    ctx.drawImage(
-      img,
-      0,
-      0,
-      canvas.width,
-      canvas.height
-    )
-
-    const ajustada =
-      await new Promise<string>(
-        (resolve) => {
-          canvas.toBlob(
-            (nuevoBlob) => {
-              resolve(
-                nuevoBlob
-                  ? URL.createObjectURL(
-                      nuevoBlob
-                    )
-                  : objectUrl
-              )
-            },
-            'image/jpeg',
-            0.95
-          )
-        }
+    const ajustada = await new Promise<string>((resolve) => {
+      canvas.toBlob(
+        (nuevoBlob) => {
+          resolve(nuevoBlob ? URL.createObjectURL(nuevoBlob) : objectUrl)
+        },
+        'image/jpeg',
+        0.95
       )
+    })
 
     return ajustada
   } catch {
@@ -710,23 +658,30 @@ async function prepararOriginalSeguro(
 
 /* =========================================================
    FUENTE DE CADA ESCENA
+   nivel 0 = normal, 1 = reducida a 4096, 2 = reducida a 2048
    ========================================================= */
 
 function fuenteParaEscena(
-  definition: SceneDef
+  definition: SceneDef,
+  nivel: number = 0,
+  onProgress?: (pct: number | null) => void
 ): Promise<string> {
+  if (nivel === 1) {
+    return prepararFuenteSegura(definition.src, 4096, true, true)
+  }
+
+  if (nivel >= 2) {
+    return prepararFuenteSegura(definition.src, 2048, true, true)
+  }
+
   if (definition.usarOriginal) {
-    return prepararOriginalSeguro(
-      definition.src
-    )
+    return prepararOriginalSeguro(definition.src, onProgress)
   }
 
   return prepararFuenteSegura(
     definition.src,
-    definition.maxTextureDim ??
-      MAX_TEXTURE_DIM,
-    definition.skipSharpen ??
-      false
+    definition.maxTextureDim ?? MAX_TEXTURE_DIM,
+    definition.skipSharpen ?? false
   )
 }
 
@@ -734,96 +689,37 @@ function fuenteParaEscena(
    COMPONENTE
    ========================================================= */
 
-export default function InteriorTour({
-  onExit,
-}: InteriorTourProps) {
-  const containerRef =
-    useRef<HTMLDivElement | null>(null)
+export default function InteriorTour({ onExit }: InteriorTourProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const viewerRef = useRef<PanolensNS.Viewer | null>(null)
+  const panolensRef = useRef<typeof PanolensNS | null>(null)
 
-  const viewerRef =
-    useRef<PanolensNS.Viewer | null>(
-      null
-    )
+  const panoramaCacheRef = useRef<Map<SceneId, PanolensNS.ImagePanorama>>(
+    new Map()
+  )
 
-  const panolensRef =
-    useRef<typeof PanolensNS | null>(
-      null
-    )
+  const pendingPanoRef = useRef<
+    Map<SceneId, Promise<PanolensNS.ImagePanorama | null>>
+  >(new Map())
 
-  const panoramaCacheRef =
-    useRef<
-      Map<
-        SceneId,
-        PanolensNS.ImagePanorama
-      >
-    >(new Map())
+  const revealRafRef = useRef<number | null>(null)
+  const walkRafRef = useRef<number | null>(null)
+  const veilRef = useRef<HTMLDivElement | null>(null)
+  const sceneIdRef = useRef<SceneId>(START_SCENE)
+  const switchingRef = useRef(false)
 
-  const pendingPanoRef =
-    useRef<
-      Map<
-        SceneId,
-        Promise<
-          PanolensNS.ImagePanorama | null
-        >
-      >
-    >(new Map())
+  const [sceneId, setSceneId] = useState<SceneId>(START_SCENE)
+  const [ready, setReady] = useState(false)
+  const [revealed, setRevealed] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const [exiting, setExiting] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
 
-  const revealRafRef =
-    useRef<number | null>(null)
+  const [overlayText, setOverlayText] = useState('Optimizando imagen 360°...')
+  const [overlayVisible, setOverlayVisible] = useState(true)
+  const [overlayMounted, setOverlayMounted] = useState(true)
 
-  const walkRafRef =
-    useRef<number | null>(null)
-
-  const veilRef =
-    useRef<HTMLDivElement | null>(
-      null
-    )
-
-  const sceneIdRef =
-    useRef<SceneId>(
-      START_SCENE
-    )
-
-  const switchingRef =
-    useRef(false)
-
-  const [sceneId, setSceneId] =
-    useState<SceneId>(
-      START_SCENE
-    )
-
-  const [ready, setReady] =
-    useState(false)
-
-  const [revealed, setRevealed] =
-    useState(false)
-
-  const [switching, setSwitching] =
-    useState(false)
-
-  const [exiting, setExiting] =
-    useState(false)
-
-  // Este es el mensaje que querías.
-  const [overlayText, setOverlayText] =
-    useState(
-      'Optimizando imagen 360°...'
-    )
-
-  const [
-    overlayVisible,
-    setOverlayVisible,
-  ] = useState(true)
-
-  const [
-    overlayMounted,
-    setOverlayMounted,
-  ] = useState(true)
-
-  const [
-    infoPanel,
-    setInfoPanel,
-  ] = useState<{
+  const [infoPanel, setInfoPanel] = useState<{
     label: string
     lines: string[]
     link?: {
@@ -832,21 +728,15 @@ export default function InteriorTour({
     }
   } | null>(null)
 
-  const [
-    errorCarga,
-    setErrorCarga,
-  ] = useState<string | null>(
-    null
-  )
+  const [errorCarga, setErrorCarga] = useState<string | null>(null)
+  const [errorFatal, setErrorFatal] = useState(false)
 
   useEffect(() => {
-    sceneIdRef.current =
-      sceneId
+    sceneIdRef.current = sceneId
   }, [sceneId])
 
   useEffect(() => {
-    switchingRef.current =
-      switching
+    switchingRef.current = switching
   }, [switching])
 
   /* =======================================================
@@ -859,10 +749,9 @@ export default function InteriorTour({
       return
     }
 
-    const timeout =
-      setTimeout(() => {
-        setOverlayMounted(false)
-      }, 500)
+    const timeout = setTimeout(() => {
+      setOverlayMounted(false)
+    }, 500)
 
     return () => {
       clearTimeout(timeout)
@@ -878,13 +767,9 @@ export default function InteriorTour({
     id: SceneId,
     srcSeguro: string
   ): PanolensNS.ImagePanorama => {
-    const scene =
-      SCENES[id]
+    const scene = SCENES[id]
 
-    const panorama =
-      new PANOLENS.ImagePanorama(
-        srcSeguro
-      )
+    const panorama = new PANOLENS.ImagePanorama(srcSeguro)
 
     panorama.addEventListener(
       'click',
@@ -897,8 +782,7 @@ export default function InteriorTour({
           }
         }>
       }) => {
-        const point =
-          event.intersects?.[0]?.point
+        const point = event.intersects?.[0]?.point
 
         if (!point) return
 
@@ -911,83 +795,37 @@ export default function InteriorTour({
       }
     )
 
-    scene.arrows.forEach(
-      ({
-        to,
-        position,
-        size = 220,
-        label,
-      }) => {
-        const arrow =
-          new PANOLENS.Infospot(
-            size,
-            PANOLENS.DataImage.Arrow
-          )
+    scene.arrows.forEach(({ to, position, size = 220, label }) => {
+      const arrow = new PANOLENS.Infospot(size, PANOLENS.DataImage.Arrow)
 
-        arrow.position.set(
-          position[0],
-          position[1],
-          position[2]
-        )
+      arrow.position.set(position[0], position[1], position[2])
 
-        arrow.addHoverText(
+      arrow.addHoverText(label, 24)
+
+      arrow.addEventListener('click', () => {
+        goToScene(to, arrow.position)
+      })
+
+      panorama.add(arrow)
+    })
+
+    scene.infos.forEach(({ position, size = 220, label, lines, link }) => {
+      const info = new PANOLENS.Infospot(size, PANOLENS.DataImage.Info)
+
+      info.position.set(position[0], position[1], position[2])
+
+      info.addHoverText(label, 24)
+
+      info.addEventListener('click', () => {
+        setInfoPanel({
           label,
-          24
-        )
+          lines,
+          link,
+        })
+      })
 
-        arrow.addEventListener(
-          'click',
-          () => {
-            goToScene(
-              to,
-              arrow.position
-            )
-          }
-        )
-
-        panorama.add(arrow)
-      }
-    )
-
-    scene.infos.forEach(
-      ({
-        position,
-        size = 220,
-        label,
-        lines,
-        link,
-      }) => {
-        const info =
-          new PANOLENS.Infospot(
-            size,
-            PANOLENS.DataImage.Info
-          )
-
-        info.position.set(
-          position[0],
-          position[1],
-          position[2]
-        )
-
-        info.addHoverText(
-          label,
-          24
-        )
-
-        info.addEventListener(
-          'click',
-          () => {
-            setInfoPanel({
-              label,
-              lines,
-              link,
-            })
-          }
-        )
-
-        panorama.add(info)
-      }
-    )
+      panorama.add(info)
+    })
 
     return panorama
   }
@@ -999,205 +837,183 @@ export default function InteriorTour({
   useEffect(() => {
     let cancelled = false
 
-    const mountedAt =
-      performance.now()
+    const mountedAt = performance.now()
 
-    const iniciar =
-      async () => {
+    const iniciar = async () => {
+      try {
+        setErrorCarga(null)
+        setErrorFatal(false)
+        setReady(false)
+        setRevealed(false)
+        setOverlayText('Optimizando imagen 360°...')
+        setOverlayVisible(true)
+
+        const PANOLENS = await import('panolens')
+
+        if (cancelled || !containerRef.current) {
+          return
+        }
+
+        panolensRef.current = PANOLENS
+
+        const viewer = new PANOLENS.Viewer({
+          container: containerRef.current,
+          controlBar: true,
+          controlButtons: ['fullscreen', 'setting'],
+          autoRotate: false,
+          cameraFov: REVEAL_FOV_START,
+          output: 'none',
+        })
+
+        viewerRef.current = viewer
+
+        /* ===============================================
+           RENDIMIENTO
+           =============================================== */
+
         try {
-          setOverlayText(
-            'Optimizando imagen 360°...'
-          )
-
-          setOverlayVisible(true)
-
-          const PANOLENS =
-            await import('panolens')
-
-          if (
-            cancelled ||
-            !containerRef.current
-          ) {
-            return
+          const internal = viewer as unknown as {
+            renderer?: {
+              setPixelRatio: (ratio: number) => void
+            }
+            onWindowResize?: () => void
           }
 
-          panolensRef.current =
-            PANOLENS
-
-          const viewer =
-            new PANOLENS.Viewer({
-              container:
-                containerRef.current,
-
-              controlBar: true,
-
-              controlButtons: [
-                'fullscreen',
-                'setting',
-              ],
-
-              autoRotate: false,
-
-              cameraFov:
-                REVEAL_FOV_START,
-
-              output: 'none',
-            })
-
-          viewerRef.current =
-            viewer
-
-          /* ===============================================
-             RENDIMIENTO
-             =============================================== */
-
-          try {
-            const internal =
-              viewer as unknown as {
-                renderer?: {
-                  setPixelRatio: (
-                    ratio: number
-                  ) => void
-                }
-
-                onWindowResize?: () =>
-                  void
-              }
-
-            internal.renderer?.setPixelRatio(
-              Math.min(
-                window.devicePixelRatio ||
-                  1,
-                MAX_PIXEL_RATIO
-              )
-            )
-
-            internal.onWindowResize?.()
-          } catch {
-            // continuar
-          }
-
-          /* ===============================================
-             PREPARAR TERMINAL
-
-             Mantiene prepararOriginalSeguro().
-             =============================================== */
-
-          const startDefinition =
-            SCENES[START_SCENE]
-
-          setOverlayText(
-            'Optimizando imagen 360°...'
+          internal.renderer?.setPixelRatio(
+            Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO)
           )
 
-          const srcSeguro =
-            await fuenteParaEscena(
-              startDefinition
-            )
+          internal.onWindowResize?.()
+        } catch {
+          // continuar
+        }
 
-          if (cancelled) {
-            return
+        /* ===============================================
+           CARGAR TERMINAL CON PLAN B
+           nivel 0: original
+           nivel 1: reducida a 4096
+           nivel 2: reducida a 2048
+           =============================================== */
+
+        const startDefinition = SCENES[START_SCENE]
+
+        let primera: PanolensNS.ImagePanorama | null = null
+
+        for (let nivel = 0; nivel <= 2; nivel++) {
+          if (cancelled) return
+
+          if (nivel === 0) {
+            setOverlayText('Optimizando imagen 360°...')
+          } else {
+            setOverlayText('Ajustando imagen para tu dispositivo...')
           }
 
-          const first =
-            buildScenePanorama(
-              PANOLENS,
-              START_SCENE,
-              srcSeguro
-            )
-
-          panoramaCacheRef.current.set(
-            START_SCENE,
-            first
-          )
-
-          first.addEventListener(
-            'load',
-            async () => {
-              if (cancelled) {
-                return
+          const srcSeguro = await fuenteParaEscena(
+            startDefinition,
+            nivel,
+            (pct) => {
+              if (cancelled) return
+              if (pct === null) {
+                setOverlayText('Descargando imagen 360°...')
+              } else {
+                setOverlayText(`Descargando imagen 360°... ${pct}%`)
               }
-
-              // Dejamos que WebGL procese la textura
-              // mientras el loader continúa encima.
-              setOverlayText(
-                'Optimizando imagen 360°...'
-              )
-
-              await esperarFrames(
-                WARMUP_FRAMES
-              )
-
-              if (cancelled) {
-                return
-              }
-
-              const elapsed =
-                performance.now() -
-                mountedAt
-
-              const wait =
-                Math.max(
-                  0,
-                  MIN_OVERLAY_TIME -
-                    elapsed
-                )
-
-              setTimeout(() => {
-                if (!cancelled) {
-                  setReady(true)
-                }
-              }, wait)
             }
           )
 
-          viewer.add(first)
-        } catch (error) {
-          console.error(
-            '[InteriorTour]',
-            error
+          if (cancelled) return
+
+          setOverlayText('Optimizando imagen 360°...')
+
+          const pano = buildScenePanorama(PANOLENS, START_SCENE, srcSeguro)
+
+          if (nivel === 0) {
+            viewer.add(pano)
+          } else {
+            viewer.add(pano)
+            viewer.setPanorama(pano)
+          }
+
+          const ok = await esperarCargaPanorama(pano, LOAD_TIMEOUT)
+
+          if (cancelled) return
+
+          if (ok) {
+            primera = pano
+            break
+          }
+
+          console.warn(
+            `[InteriorTour] la textura no cargó (nivel ${nivel}). Probando plan B...`
           )
 
-          setErrorCarga(
-            'No se pudo cargar el recorrido 360°.'
-          )
+          try {
+            viewer.remove(pano)
+          } catch {
+            // ignorar
+          }
+
+          try {
+            pano.dispose()
+          } catch {
+            // ignorar
+          }
         }
+
+        if (!primera) {
+          setOverlayVisible(false)
+          setErrorFatal(true)
+          setErrorCarga(
+            'No se pudo cargar el recorrido 360°. Revisá tu conexión e intentá de nuevo.'
+          )
+          return
+        }
+
+        panoramaCacheRef.current.set(START_SCENE, primera)
+
+        await esperarFrames(WARMUP_FRAMES, WARMUP_MAX_MS)
+
+        if (cancelled) return
+
+        const elapsed = performance.now() - mountedAt
+
+        const wait = Math.max(0, MIN_OVERLAY_TIME - elapsed)
+
+        setTimeout(() => {
+          if (!cancelled) {
+            setReady(true)
+          }
+        }, wait)
+      } catch (error) {
+        console.error('[InteriorTour]', error)
+
+        setOverlayVisible(false)
+        setErrorFatal(true)
+        setErrorCarga('No se pudo cargar el recorrido 360°.')
       }
+    }
 
     iniciar()
 
     return () => {
       cancelled = true
 
-      if (
-        revealRafRef.current !==
-        null
-      ) {
-        cancelAnimationFrame(
-          revealRafRef.current
-        )
+      if (revealRafRef.current !== null) {
+        cancelAnimationFrame(revealRafRef.current)
       }
 
-      if (
-        walkRafRef.current !==
-        null
-      ) {
-        cancelAnimationFrame(
-          walkRafRef.current
-        )
+      if (walkRafRef.current !== null) {
+        cancelAnimationFrame(walkRafRef.current)
       }
 
-      if (
-        viewerRef.current
-      ) {
+      if (viewerRef.current) {
         try {
           viewerRef.current.destroy()
         } catch {
           // ignorar
         }
 
-        viewerRef.current =
-          null
+        viewerRef.current = null
       }
 
       panoramaCacheRef.current.clear()
@@ -1205,7 +1021,7 @@ export default function InteriorTour({
     }
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [retryKey])
 
   /* =======================================================
      REVELAR TERMINAL
@@ -1216,78 +1032,40 @@ export default function InteriorTour({
       return
     }
 
-    const viewer =
-      viewerRef.current
+    const viewer = viewerRef.current
 
     if (!viewer) {
       return
     }
 
-    const startTime =
-      performance.now()
+    const startTime = performance.now()
 
-    const animateReveal = (
-      now: number
-    ) => {
-      const progress =
-        Math.min(
-          1,
-          (now - startTime) /
-            REVEAL_DURATION
-        )
+    const animateReveal = (now: number) => {
+      const progress = Math.min(1, (now - startTime) / REVEAL_DURATION)
 
-      const eased =
-        easeInOutCubic(
-          progress
-        )
+      const eased = easeInOutCubic(progress)
 
       viewer.camera.fov =
-        REVEAL_FOV_START +
-        (
-          REVEAL_FOV_END -
-          REVEAL_FOV_START
-        ) *
-          eased
+        REVEAL_FOV_START + (REVEAL_FOV_END - REVEAL_FOV_START) * eased
 
       viewer.camera.updateProjectionMatrix()
 
       if (progress < 1) {
-        revealRafRef.current =
-          requestAnimationFrame(
-            animateReveal
-          )
-
+        revealRafRef.current = requestAnimationFrame(animateReveal)
         return
       }
 
-      revealRafRef.current =
-        null
+      revealRafRef.current = null
 
       setRevealed(true)
-
-      // AQUÍ termina la optimización y desaparece
-      // completamente el overlay.
       setOverlayVisible(false)
-
-      // IMPORTANTE:
-      // NO hacemos prefetchNeighbors aquí.
-      // Nada compite con la GPU mientras el usuario
-      // gira la Terminal.
     }
 
-    revealRafRef.current =
-      requestAnimationFrame(
-        animateReveal
-      )
+    revealRafRef.current = requestAnimationFrame(animateReveal)
 
     return () => {
-      if (
-        revealRafRef.current !==
-        null
-      ) {
-        cancelAnimationFrame(
-          revealRafRef.current
-        )
+      if (revealRafRef.current !== null) {
+        cancelAnimationFrame(revealRafRef.current)
       }
     }
   }, [ready])
@@ -1296,92 +1074,57 @@ export default function InteriorTour({
      OBTENER / CREAR OTRAS ESCENAS
      ======================================================= */
 
-  const getOrCreatePanorama =
-    async (
-      id: SceneId
-    ): Promise<
-      PanolensNS.ImagePanorama | null
-    > => {
-      const PANOLENS =
-        panolensRef.current
+  const getOrCreatePanorama = async (
+    id: SceneId
+  ): Promise<PanolensNS.ImagePanorama | null> => {
+    const PANOLENS = panolensRef.current
 
-      const viewer =
-        viewerRef.current
+    const viewer = viewerRef.current
 
-      if (
-        !PANOLENS ||
-        !viewer
-      ) {
+    if (!PANOLENS || !viewer) {
+      return null
+    }
+
+    const cache = panoramaCacheRef.current
+
+    const existente = cache.get(id)
+
+    if (existente) {
+      return existente
+    }
+
+    const enCurso = pendingPanoRef.current.get(id)
+
+    if (enCurso) {
+      return enCurso
+    }
+
+    const promesa = (async () => {
+      const definition = SCENES[id]
+
+      const srcSeguro = await fuenteParaEscena(definition)
+
+      if (!viewerRef.current) {
         return null
       }
 
-      const cache =
-        panoramaCacheRef.current
+      const panorama = buildScenePanorama(PANOLENS, id, srcSeguro)
 
-      const existente =
-        cache.get(id)
+      cache.set(id, panorama)
 
-      if (existente) {
-        return existente
-      }
+      viewerRef.current.add(panorama)
 
-      const enCurso =
-        pendingPanoRef.current.get(
-          id
-        )
+      return panorama
+    })()
 
-      if (enCurso) {
-        return enCurso
-      }
+    pendingPanoRef.current.set(id, promesa)
 
-      const promesa =
-        (async () => {
-          const definition =
-            SCENES[id]
+    promesa.finally(() => {
+      pendingPanoRef.current.delete(id)
+    })
 
-          const srcSeguro =
-            await fuenteParaEscena(
-              definition
-            )
-
-          if (
-            !viewerRef.current
-          ) {
-            return null
-          }
-
-          const panorama =
-            buildScenePanorama(
-              PANOLENS,
-              id,
-              srcSeguro
-            )
-
-          cache.set(
-            id,
-            panorama
-          )
-
-          viewerRef.current.add(
-            panorama
-          )
-
-          return panorama
-        })()
-
-      pendingPanoRef.current.set(
-        id,
-        promesa
-      )
-
-      promesa.finally(() => {
-        pendingPanoRef.current.delete(
-          id
-        )
-      })
-
-      return promesa
-    }
+    return promesa
+  }
 
   /* =======================================================
      ANIMACIÓN GENÉRICA
@@ -1389,81 +1132,50 @@ export default function InteriorTour({
 
   const runAnimation = (
     duration: number,
-    onFrame: (
-      progress: number
-    ) => void
+    onFrame: (progress: number) => void
   ): Promise<void> =>
     new Promise((resolve) => {
-      const start =
-        performance.now()
+      const start = performance.now()
 
-      const step = (
-        now: number
-      ) => {
-        if (
-          !viewerRef.current
-        ) {
+      const step = (now: number) => {
+        if (!viewerRef.current) {
           resolve()
           return
         }
 
-        const progress =
-          Math.min(
-            1,
-            (now - start) /
-              duration
-          )
+        const progress = Math.min(1, (now - start) / duration)
 
         onFrame(progress)
 
         if (progress < 1) {
-          walkRafRef.current =
-            requestAnimationFrame(
-              step
-            )
+          walkRafRef.current = requestAnimationFrame(step)
         } else {
-          walkRafRef.current =
-            null
-
+          walkRafRef.current = null
           resolve()
         }
       }
 
-      walkRafRef.current =
-        requestAnimationFrame(
-          step
-        )
+      walkRafRef.current = requestAnimationFrame(step)
     })
 
   /* =======================================================
      VELO
      ======================================================= */
 
-  const setVeil = (
-    opacity: number
-  ) => {
-    const element =
-      veilRef.current
+  const setVeil = (opacity: number) => {
+    const element = veilRef.current
 
     if (!element) {
       return
     }
 
-    element.style.opacity =
-      String(opacity)
+    element.style.opacity = String(opacity)
 
-    element.style.visibility =
-      opacity <= 0.001
-        ? 'hidden'
-        : 'visible'
+    element.style.visibility = opacity <= 0.001 ? 'hidden' : 'visible'
   }
 
-  const restoreView = (
-    viewer: PanolensNS.Viewer,
-    fov: number
-  ) => {
-    viewer.camera.fov =
-      fov
+  const restoreView = (viewer: PanolensNS.Viewer, fov: number) => {
+    viewer.camera.fov = fov
 
     viewer.camera.updateProjectionMatrix()
 
@@ -1474,287 +1186,145 @@ export default function InteriorTour({
      CAMBIAR ESCENA
      ======================================================= */
 
-  const goToScene = async (
-    targetId: SceneId,
-    fromPosition?: HotspotPos
-  ) => {
-    const viewer =
-      viewerRef.current
+  const goToScene = async (targetId: SceneId, fromPosition?: HotspotPos) => {
+    const viewer = viewerRef.current
 
-    if (
-      !viewer ||
-      switchingRef.current ||
-      targetId ===
-        sceneIdRef.current
-    ) {
+    if (!viewer || switchingRef.current || targetId === sceneIdRef.current) {
       return
     }
 
-    switchingRef.current =
-      true
+    switchingRef.current = true
 
     setInfoPanel(null)
 
     setErrorCarga(null)
 
-    setOverlayText(
-      `Entrando a ${SCENES[targetId].label}...`
-    )
+    setOverlayText(`Entrando a ${SCENES[targetId].label}...`)
 
     setSwitching(true)
 
-    const baseFov =
-      viewer.camera.fov
+    const baseFov = viewer.camera.fov
 
-    const targetPromise =
-      getOrCreatePanorama(
-        targetId
-      )
+    const targetPromise = getOrCreatePanorama(targetId)
 
-    /* =====================================================
-       GIRAR HACIA FLECHA
-       ===================================================== */
+    /* GIRAR HACIA FLECHA */
 
     if (fromPosition) {
-      const internal =
-        viewer as unknown as {
-          tweenControlCenter?: (
-            vector: unknown,
-            duration?: number
-          ) => void
-        }
+      const internal = viewer as unknown as {
+        tweenControlCenter?: (vector: unknown, duration?: number) => void
+      }
 
       try {
-        internal.tweenControlCenter?.(
-          fromPosition,
-          WALK_TURN_MS
-        )
+        internal.tweenControlCenter?.(fromPosition, WALK_TURN_MS)
       } catch {
         // continuar
       }
     }
 
-    const zoomFactor =
-      fromPosition
-        ? WALK_ZOOM_FACTOR
-        : BACK_ZOOM_FACTOR
+    const zoomFactor = fromPosition ? WALK_ZOOM_FACTOR : BACK_ZOOM_FACTOR
 
-    const zoomDuration =
-      fromPosition
-        ? WALK_ZOOM_MS
-        : BACK_ZOOM_MS
+    const zoomDuration = fromPosition ? WALK_ZOOM_MS : BACK_ZOOM_MS
 
-    const finalFov =
-      baseFov *
-      zoomFactor
+    const finalFov = baseFov * zoomFactor
 
-    await runAnimation(
-      zoomDuration,
-      (progress) => {
-        viewer.camera.fov =
-          baseFov +
-          (
-            finalFov -
-            baseFov
-          ) *
-            easeInCubic(
-              progress
-            )
+    await runAnimation(zoomDuration, (progress) => {
+      viewer.camera.fov =
+        baseFov + (finalFov - baseFov) * easeInCubic(progress)
 
-        viewer.camera.updateProjectionMatrix()
+      viewer.camera.updateProjectionMatrix()
 
-        setVeil(
-          progress < 0.55
-            ? 0
-            : easeInOutCubic(
-                (progress -
-                  0.55) /
-                  0.45
-              )
-        )
-      }
-    )
+      setVeil(
+        progress < 0.55 ? 0 : easeInOutCubic((progress - 0.55) / 0.45)
+      )
+    })
 
-    if (
-      !viewerRef.current
-    ) {
+    if (!viewerRef.current) {
       return
     }
 
-    /* =====================================================
-       LOADER SI TARDA
-       ===================================================== */
+    /* LOADER SI TARDA */
 
-    const spinnerTimer =
-      setTimeout(() => {
-        setOverlayVisible(
-          true
-        )
-      }, SPINNER_DELAY)
+    const spinnerTimer = setTimeout(() => {
+      setOverlayVisible(true)
+    }, SPINNER_DELAY)
 
     const hideSpinner = () => {
-      clearTimeout(
-        spinnerTimer
-      )
-
-      setOverlayVisible(
-        false
-      )
+      clearTimeout(spinnerTimer)
+      setOverlayVisible(false)
     }
 
-    const target =
-      await targetPromise
+    const fallar = (mensaje: string) => {
+      hideSpinner()
+
+      restoreView(viewer, baseFov)
+
+      switchingRef.current = false
+
+      setSwitching(false)
+
+      setErrorCarga(mensaje)
+
+      setTimeout(() => {
+        setErrorCarga((actual) => (actual === mensaje ? null : actual))
+      }, 4000)
+    }
+
+    const target = await targetPromise
 
     if (!target) {
-      hideSpinner()
-
-      restoreView(
-        viewer,
-        baseFov
-      )
-
-      switchingRef.current =
-        false
-
-      setSwitching(false)
-
-      setErrorCarga(
-        'No se pudo cargar esta escena. Volvé a intentar.'
-      )
-
+      fallar('No se pudo cargar esta escena. Volvé a intentar.')
       return
     }
 
-    /* =====================================================
-       LLEGADA
-       ===================================================== */
+    /* LLEGADA */
 
-    const arrive =
-      async () => {
-        // Damos algunos frames a la nueva textura.
-        setOverlayText(
-          'Optimizando imagen 360°...'
-        )
+    viewer.setPanorama(target)
 
-        await esperarFrames(8)
+    const cargada = await esperarCargaPanorama(target, LOAD_TIMEOUT)
 
-        hideSpinner()
-
-        const startFov =
-          baseFov *
-          ARRIVE_START_FACTOR
-
-        viewer.camera.fov =
-          startFov
-
-        viewer.camera.updateProjectionMatrix()
-
-        await runAnimation(
-          ARRIVE_MS,
-          (progress) => {
-            const eased =
-              easeOutCubic(
-                progress
-              )
-
-            viewer.camera.fov =
-              startFov +
-              (
-                baseFov -
-                startFov
-              ) *
-                eased
-
-            viewer.camera.updateProjectionMatrix()
-
-            setVeil(
-              1 - eased
-            )
-          }
-        )
-
-        sceneIdRef.current =
-          targetId
-
-        setSceneId(
-          targetId
-        )
-
-        setVeil(0)
-
-        switchingRef.current =
-          false
-
-        setSwitching(false)
-
-        // NO precargamos vecinos.
-      }
-
-    if (target.loaded) {
-      viewer.setPanorama(
-        target
-      )
-
-      await arrive()
-
+    if (!viewerRef.current) {
       return
     }
 
-    let resolved = false
+    if (!cargada) {
+      // Sacamos la escena fallida del caché para poder reintentar.
+      panoramaCacheRef.current.delete(targetId)
 
-    const onLoad =
-      async () => {
-        if (resolved) {
-          return
-        }
+      fallar('La imagen está tardando demasiado en cargar. Volvé a intentar.')
+      return
+    }
 
-        resolved = true
+    setOverlayText('Optimizando imagen 360°...')
 
-        target.removeEventListener(
-          'load',
-          onLoad
-        )
+    await esperarFrames(8, 800)
 
-        await arrive()
-      }
+    hideSpinner()
 
-    target.addEventListener(
-      'load',
-      onLoad
-    )
+    const startFov = baseFov * ARRIVE_START_FACTOR
 
-    viewer.setPanorama(
-      target
-    )
+    viewer.camera.fov = startFov
 
-    setTimeout(() => {
-      if (resolved) {
-        return
-      }
+    viewer.camera.updateProjectionMatrix()
 
-      resolved = true
+    await runAnimation(ARRIVE_MS, (progress) => {
+      const eased = easeOutCubic(progress)
 
-      target.removeEventListener(
-        'load',
-        onLoad
-      )
+      viewer.camera.fov = startFov + (baseFov - startFov) * eased
 
-      hideSpinner()
+      viewer.camera.updateProjectionMatrix()
 
-      restoreView(
-        viewer,
-        baseFov
-      )
+      setVeil(1 - eased)
+    })
 
-      switchingRef.current =
-        false
+    sceneIdRef.current = targetId
 
-      setSwitching(false)
+    setSceneId(targetId)
 
-      setErrorCarga(
-        'La imagen está tardando demasiado en cargar. Volvé a intentar.'
-      )
-    }, LOAD_TIMEOUT)
+    setVeil(0)
+
+    switchingRef.current = false
+
+    setSwitching(false)
   }
 
   /* =======================================================
@@ -1768,10 +1338,7 @@ export default function InteriorTour({
 
     setExiting(true)
 
-    setTimeout(
-      onExit,
-      EXIT_DURATION
-    )
+    setTimeout(onExit, EXIT_DURATION)
   }
 
   /* =======================================================
@@ -1779,49 +1346,40 @@ export default function InteriorTour({
      ======================================================= */
 
   const handleBack = () => {
-    if (
-      exiting ||
-      switchingRef.current
-    ) {
+    if (exiting || switchingRef.current) {
       return
     }
 
-    const current =
-      SCENES[
-        sceneIdRef.current
-      ]
+    const current = SCENES[sceneIdRef.current]
 
     if (current.backTo) {
-      goToScene(
-        current.backTo
-      )
-
+      goToScene(current.backTo)
       return
     }
 
     handleExit()
   }
 
-  const infoLink =
-    infoPanel?.link ??
-    null
+  /* =======================================================
+     REINTENTAR
+     ======================================================= */
+
+  const handleRetry = () => {
+    setErrorCarga(null)
+    setErrorFatal(false)
+    setOverlayVisible(true)
+    setRetryKey((k) => k + 1)
+  }
+
+  const infoLink = infoPanel?.link ?? null
 
   /* =======================================================
      JSX
      ======================================================= */
 
   return (
-    <div
-      className={`tvisit-stage ${
-        exiting
-          ? 'tvisit-stage--exiting'
-          : ''
-      }`}
-    >
-      <div
-        ref={containerRef}
-        className="tvisit-viewer"
-      />
+    <div className={`tvisit-stage ${exiting ? 'tvisit-stage--exiting' : ''}`}>
+      <div ref={containerRef} className="tvisit-viewer" />
 
       <div
         ref={veilRef}
@@ -1841,73 +1399,45 @@ export default function InteriorTour({
         <>
           <div
             className="tvisit-info-backdrop"
-            onClick={() =>
-              setInfoPanel(null)
-            }
+            onClick={() => setInfoPanel(null)}
           />
 
           <div className="tvisit-info-panel v360-glass">
             <button
               type="button"
               className="tvisit-info-panel__close"
-              onClick={() =>
-                setInfoPanel(null)
-              }
+              onClick={() => setInfoPanel(null)}
               aria-label="Cerrar"
             >
               ×
             </button>
 
-            <div className="tvisit-info-panel__eyebrow">
-              Punto de interés
-            </div>
+            <div className="tvisit-info-panel__eyebrow">Punto de interés</div>
 
-            <h3 className="tvisit-info-panel__title">
-              {infoPanel.label}
-            </h3>
+            <h3 className="tvisit-info-panel__title">{infoPanel.label}</h3>
 
-            {infoPanel.lines.map(
-              (
-                line,
-                index
-              ) => (
-                <p
-                  key={index}
-                  className="tvisit-info-panel__text"
-                >
-                  {line}
-                </p>
-              )
-            )}
+            {infoPanel.lines.map((line, index) => (
+              <p key={index} className="tvisit-info-panel__text">
+                {line}
+              </p>
+            ))}
 
             {infoLink ? (
               <button
                 type="button"
                 onClick={() =>
-                  window.open(
-                    infoLink.url,
-                    '_blank',
-                    'noopener,noreferrer'
-                  )
+                  window.open(infoLink.url, '_blank', 'noopener,noreferrer')
                 }
                 style={{
-                  display:
-                    'inline-block',
+                  display: 'inline-block',
                   marginTop: 12,
-                  padding:
-                    '10px 18px',
-                  borderRadius:
-                    999,
-                  border:
-                    'none',
-                  background:
-                    '#0b57d0',
-                  color:
-                    '#fff',
-                  fontWeight:
-                    600,
-                  cursor:
-                    'pointer',
+                  padding: '10px 18px',
+                  borderRadius: 999,
+                  border: 'none',
+                  background: '#0b57d0',
+                  color: '#fff',
+                  fontWeight: 600,
+                  cursor: 'pointer',
                 }}
               >
                 {infoLink.text}
@@ -1917,20 +1447,16 @@ export default function InteriorTour({
         </>
       ) : null}
 
-      {overlayMounted ? (
+      {overlayMounted && !errorFatal ? (
         <div
           className={`tvisit-overlay ${
-            overlayVisible
-              ? ''
-              : 'tvisit-overlay--hidden'
+            overlayVisible ? '' : 'tvisit-overlay--hidden'
           }`}
         >
           <div className="tvisit-overlay__card v360-glass">
             <div className="tvisit-overlay__spinner" />
 
-            <span className="tvisit-overlay__text">
-              {overlayText}
-            </span>
+            <span className="tvisit-overlay__text">{overlayText}</span>
           </div>
         </div>
       ) : null}
@@ -1938,9 +1464,50 @@ export default function InteriorTour({
       {errorCarga ? (
         <div className="tvisit-overlay">
           <div className="tvisit-overlay__card v360-glass">
-            <span className="tvisit-overlay__text">
-              {errorCarga}
-            </span>
+            <span className="tvisit-overlay__text">{errorCarga}</span>
+
+            {errorFatal ? (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 10,
+                  marginTop: 14,
+                  justifyContent: 'center',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={handleRetry}
+                  style={{
+                    padding: '10px 18px',
+                    borderRadius: 999,
+                    border: 'none',
+                    background: '#0b57d0',
+                    color: '#fff',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Reintentar
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExit}
+                  style={{
+                    padding: '10px 18px',
+                    borderRadius: 999,
+                    border: '1px solid rgba(255,255,255,0.3)',
+                    background: 'transparent',
+                    color: '#fff',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Salir
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -1948,21 +1515,13 @@ export default function InteriorTour({
       {revealed ? (
         <button
           type="button"
-          onClick={
-            handleBack
-          }
-          disabled={
-            switching
-          }
+          onClick={handleBack}
+          disabled={switching}
           className="tvisit-back v360-neu"
         >
-          <span className="tvisit-back__arrow">
-            ←
-          </span>
+          <span className="tvisit-back__arrow">←</span>
 
-          <span>
-            Volver
-          </span>
+          <span>Volver</span>
         </button>
       ) : null}
     </div>
