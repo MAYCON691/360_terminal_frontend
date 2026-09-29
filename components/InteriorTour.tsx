@@ -34,10 +34,7 @@ interface InfoHotspot {
   size?: number
   label: string
   lines: string[]
-  link?: {
-    url: string
-    text: string
-  }
+  link?: { url: string; text: string }
 }
 
 interface SceneDef {
@@ -48,8 +45,6 @@ interface SceneDef {
   arrows: ArrowHotspot[]
   infos: InfoHotspot[]
   maxTextureDim?: number
-  skipSharpen?: boolean
-  usarOriginal?: boolean
 }
 
 type PanoEvents = {
@@ -64,43 +59,18 @@ type PanoEvents = {
 const SCENES: Record<SceneId, SceneDef> = {
   terminal: {
     id: 'terminal',
-    src: '/DJI_085511.JPG',
+    // IMPORTANTE: en producción (Linux) importan las mayúsculas.
+    // Esta es la extensión que funcionaba: .jpg en minúscula.
+    src: '/DJI_085511.jpg',
     label: 'Terminal Metropolitana',
     backTo: null,
-    usarOriginal: true,
     maxTextureDim: 4096,
-    skipSharpen: true,
     arrows: [
-      {
-        to: 'metroarena',
-        position: [3534.34, -344.61, 3507.92],
-        size: 220,
-        label: 'METRO ARENA',
-      },
-      {
-        to: 'puerta1',
-        position: [3469.79, -937.11, 3461.12],
-        size: 220,
-        label: 'INGRESO 2',
-      },
-      {
-        to: 'puertaprincipal',
-        position: [4683.2, -1693.66, 329.35],
-        size: 220,
-        label: 'INGRESO PRINCIPAL',
-      },
-      {
-        to: 'puerta3',
-        position: [2791.8, -1400.19, -3897.7],
-        size: 220,
-        label: 'INGRESO 3',
-      },
-      {
-        to: 'helipuerto',
-        position: [2568.12, -488.73, -4253.94],
-        size: 220,
-        label: 'HELIPUERTO',
-      },
+      { to: 'metroarena', position: [3534.34, -344.61, 3507.92], size: 220, label: 'METRO ARENA' },
+      { to: 'puerta1', position: [3469.79, -937.11, 3461.12], size: 220, label: 'INGRESO 2' },
+      { to: 'puertaprincipal', position: [4683.2, -1693.66, 329.35], size: 220, label: 'INGRESO PRINCIPAL' },
+      { to: 'puerta3', position: [2791.8, -1400.19, -3897.7], size: 220, label: 'INGRESO 3' },
+      { to: 'helipuerto', position: [2568.12, -488.73, -4253.94], size: 220, label: 'HELIPUERTO' },
     ],
     infos: [],
   },
@@ -140,12 +110,7 @@ const SCENES: Record<SceneId, SceneDef> = {
     label: 'Ingreso Principal',
     backTo: 'terminal',
     arrows: [
-      {
-        to: 'patiocomidas2',
-        position: [4336.71, 2372.56, 691.85],
-        size: 220,
-        label: 'PATIO DE COMIDAS',
-      },
+      { to: 'patiocomidas2', position: [4336.71, 2372.56, 691.85], size: 220, label: 'PATIO DE COMIDAS' },
     ],
     infos: [
       {
@@ -156,10 +121,7 @@ const SCENES: Record<SceneId, SceneDef> = {
           'ATT: Autoridad de Regulación y Fiscalización de Telecomunicaciones y Transportes.',
           'Función: Entidad del Estado boliviano encargada de regular, controlar y supervisar los servicios de telecomunicaciones, transportes y correos.',
         ],
-        link: {
-          url: 'https://www.att.gob.bo/',
-          text: 'Visitar página web de la ATT',
-        },
+        link: { url: 'https://www.att.gob.bo/', text: 'Visitar página web de la ATT' },
       },
     ],
   },
@@ -170,12 +132,7 @@ const SCENES: Record<SceneId, SceneDef> = {
     label: 'Ingreso 3',
     backTo: 'terminal',
     arrows: [
-      {
-        to: 'ascensor',
-        position: [2232.09, -162.75, -4459.47],
-        size: 220,
-        label: 'ENTRAR A ASCENSOR',
-      },
+      { to: 'ascensor', position: [2232.09, -162.75, -4459.47], size: 220, label: 'ENTRAR A ASCENSOR' },
     ],
     infos: [],
   },
@@ -195,24 +152,9 @@ const SCENES: Record<SceneId, SceneDef> = {
     label: 'Ascensor',
     backTo: 'puerta3',
     arrows: [
-      {
-        to: 'piso3',
-        position: [-3887.04, -1329.8, 2842.11],
-        size: 220,
-        label: 'PISO 3',
-      },
-      {
-        to: 'piso2',
-        position: [-3785.22, -1721.29, 2773.27],
-        size: 220,
-        label: 'PISO 2',
-      },
-      {
-        to: 'puerta3',
-        position: [-3598.28, -2220.54, 2662.06],
-        size: 220,
-        label: 'PLANTA BAJA',
-      },
+      { to: 'piso3', position: [-3887.04, -1329.8, 2842.11], size: 220, label: 'PISO 3' },
+      { to: 'piso2', position: [-3785.22, -1721.29, 2773.27], size: 220, label: 'PISO 2' },
+      { to: 'puerta3', position: [-3598.28, -2220.54, 2662.06], size: 220, label: 'PLANTA BAJA' },
     ],
     infos: [],
   },
@@ -258,22 +200,21 @@ const REVEAL_DURATION = 1100
 const MIN_OVERLAY_TIME = 1400
 const EXIT_DURATION = 500
 
+// Tamaño máximo (lado mayor) de textura para cualquier escena
+// que no defina el suyo. Si al girar todavía se siente pesado,
+// bajá TERMINAL_MAX_DIM (en SCENES.terminal.maxTextureDim) a 3072 o 2560.
 const MAX_TEXTURE_DIM = 4096
 
-// Tiempo máximo esperando que una textura termine de cargar
-// (después de haber descargado el archivo).
-const LOAD_TIMEOUT = 20000
+// Tiempo máximo esperando que la textura termine de cargar en el visor.
+const LOAD_TIMEOUT = 25000
 
-// Tiempo máximo de descarga del archivo original.
+// Tiempo máximo de descarga de cada archivo.
 const FETCH_TIMEOUT = 45000
 
-const SHARPEN_AMOUNT = 0.4
-const ENABLE_SHARPEN = false
-
-// Frames de calentamiento, pero con tope de tiempo
-// para que nunca se quede colgado.
-const WARMUP_FRAMES = 30
-const WARMUP_MAX_MS = 1500
+// Calentamiento de GPU: se renderizan frames MIENTRAS el loader
+// sigue visible, para que al girar no haya tirones.
+const WARMUP_FRAMES = 40
+const WARMUP_MAX_MS = 4000
 
 const MAX_PIXEL_RATIO = 1
 
@@ -288,6 +229,8 @@ const ARRIVE_MS = 1000
 const ARRIVE_START_FACTOR = 0.72
 
 const SPINNER_DELAY = 400
+
+const TEXTO_OPTIMIZANDO = 'Optimizando imagen 360°...'
 
 /* =========================================================
    ANIMACIONES
@@ -333,9 +276,8 @@ function esperarFrames(n: number, maxMs: number = WARMUP_MAX_MS): Promise<void> 
 }
 
 /* =========================================================
-   ESPERAR QUE UN PANORAMA CARGUE (robusto)
-   - resuelve true si cargó
-   - resuelve false si dio error o se agotó el tiempo
+   ESPERAR QUE UN PANORAMA CARGUE
+   true = cargó, false = error o tiempo agotado
    ========================================================= */
 
 function esperarCargaPanorama(
@@ -378,8 +320,6 @@ function esperarCargaPanorama(
       resolve(!!target.loaded)
     }, timeoutMs)
 
-    // Por si el evento 'load' se dispara antes de que escuchemos
-    // o nunca se dispara aunque la textura sí esté lista.
     const poll = setInterval(() => {
       if (terminado) return
       if (target.loaded) {
@@ -421,127 +361,59 @@ function limiteTexturaDispositivo(): number {
 }
 
 /* =========================================================
-   NITIDEZ
+   CANDIDATOS DE URL
+   Linux distingue mayúsculas/minúsculas. Si el archivo no
+   existe con el nombre exacto, probamos con la otra variante
+   de la extensión (.jpg <-> .JPG).
    ========================================================= */
 
-function aplicarNitidez(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  amount: number
-) {
-  const imageData = ctx.getImageData(0, 0, width, height)
-  const src = imageData.data
-  const copia = new Uint8ClampedArray(src)
-  const centro = 1 + 4 * amount
-  const stride = width * 4
+function candidatosUrl(src: string): string[] {
+  const lista = [src]
 
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const index = y * stride + x * 4
+  const match = src.match(/^(.*)\.(jpe?g)$/i)
 
-      for (let channel = 0; channel < 3; channel++) {
-        const k = index + channel
+  if (match) {
+    const base = match[1]
+    const ext = match[2]
 
-        const valor =
-          copia[k] * centro -
-          amount *
-            (copia[k - 4] + copia[k + 4] + copia[k - stride] + copia[k + stride])
+    const variantes = [
+      `${base}.jpg`,
+      `${base}.JPG`,
+      `${base}.jpeg`,
+      `${base}.JPEG`,
+    ]
 
-        src[k] = valor
+    variantes.forEach((v) => {
+      if (v !== src && v.toLowerCase() !== ext && !lista.includes(v)) {
+        lista.push(v)
       }
-    }
+    })
+
+    // Aseguramos las dos variantes principales
+    ;[`${base}.jpg`, `${base}.JPG`].forEach((v) => {
+      if (!lista.includes(v)) lista.push(v)
+    })
   }
 
-  ctx.putImageData(imageData, 0, 0)
+  return lista
 }
 
 /* =========================================================
-   PREPARAR FUENTE NORMAL (reduce con canvas)
+   DESCARGA CON PROGRESO, TIMEOUT Y VARIANTES DE NOMBRE
    ========================================================= */
 
-function prepararFuenteSegura(
-  src: string,
-  maxDim: number = MAX_TEXTURE_DIM,
-  sinNitidez: boolean = false,
-  forzarReduccion: boolean = false
-): Promise<string> {
-  return new Promise((resolve) => {
-    const img = new Image()
-
-    img.crossOrigin = 'anonymous'
-
-    img.onload = () => {
-      try {
-        const ladoMayor = Math.max(img.width, img.height)
-
-        const escala = ladoMayor > maxDim ? maxDim / ladoMayor : 1
-
-        if (escala === 1 && !forzarReduccion && (!ENABLE_SHARPEN || sinNitidez)) {
-          resolve(src)
-          return
-        }
-
-        const canvas = document.createElement('canvas')
-
-        canvas.width = Math.max(1, Math.floor(img.width * escala))
-        canvas.height = Math.max(1, Math.floor(img.height * escala))
-
-        const ctx = canvas.getContext('2d')
-
-        if (!ctx) {
-          resolve(src)
-          return
-        }
-
-        ctx.imageSmoothingEnabled = true
-        ctx.imageSmoothingQuality = 'high'
-
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-
-        if (ENABLE_SHARPEN && !sinNitidez) {
-          aplicarNitidez(ctx, canvas.width, canvas.height, SHARPEN_AMOUNT)
-        }
-
-        canvas.toBlob(
-          (blob) => {
-            resolve(blob ? URL.createObjectURL(blob) : src)
-          },
-          'image/jpeg',
-          0.92
-        )
-      } catch {
-        resolve(src)
-      }
-    }
-
-    img.onerror = () => {
-      resolve(src)
-    }
-
-    img.src = src
-  })
-}
-
-/* =========================================================
-   DESCARGA CON PROGRESO Y TIMEOUT
-   ========================================================= */
-
-async function descargarBlob(
-  src: string,
+async function descargarUno(
+  url: string,
   onProgress?: (pct: number | null) => void
 ): Promise<Blob | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
 
   try {
-    const response = await fetch(src, {
-      signal: controller.signal,
-      cache: 'force-cache',
-    })
+    const response = await fetch(url, { signal: controller.signal })
 
     if (!response.ok) {
-      console.warn('[InteriorTour] fetch no OK:', src, response.status)
+      console.warn('[InteriorTour] no se pudo descargar:', url, response.status)
       return null
     }
 
@@ -570,30 +442,54 @@ async function descargarBlob(
       type: response.headers.get('content-type') || 'image/jpeg',
     })
   } catch (error) {
-    console.warn('[InteriorTour] error descargando:', src, error)
+    console.warn('[InteriorTour] error descargando:', url, error)
     return null
   } finally {
     clearTimeout(timer)
   }
 }
 
-/* =========================================================
-   ORIGINAL SEGURO
-   ========================================================= */
-
-async function prepararOriginalSeguro(
+async function descargarBlob(
   src: string,
   onProgress?: (pct: number | null) => void
-): Promise<string> {
-  try {
-    const blob = await descargarBlob(src, onProgress)
-
-    if (!blob) {
-      return src
+): Promise<Blob | null> {
+  for (const url of candidatosUrl(src)) {
+    const blob = await descargarUno(url, onProgress)
+    if (blob && blob.size > 0) {
+      if (url !== src) {
+        console.warn(
+          `[InteriorTour] "${src}" no existe en el servidor, se usó "${url}". Renombrá el archivo para evitar esta búsqueda extra.`
+        )
+      }
+      return blob
     }
+  }
 
-    const objectUrl = URL.createObjectURL(blob)
+  return null
+}
 
+/* =========================================================
+   PREPARAR IMAGEN
+   - descarga (con variantes de nombre)
+   - decodifica
+   - reduce con canvas si supera el tamaño máximo
+   Devuelve null si el archivo no existe.
+   ========================================================= */
+
+async function prepararImagen(
+  src: string,
+  maxDim: number,
+  onProgress?: (pct: number | null) => void
+): Promise<string | null> {
+  const blob = await descargarBlob(src, onProgress)
+
+  if (!blob) {
+    return null
+  }
+
+  const objectUrl = URL.createObjectURL(blob)
+
+  try {
     const img = new Image()
 
     img.src = objectUrl
@@ -614,10 +510,11 @@ async function prepararOriginalSeguro(
     const width = img.naturalWidth || img.width
     const height = img.naturalHeight || img.height
 
-    const limite = limiteTexturaDispositivo()
+    const limite = Math.min(maxDim, limiteTexturaDispositivo())
 
     const ladoMayor = Math.max(width, height)
 
+    // Si ya entra dentro del límite, usamos el archivo tal cual.
     if (!ladoMayor || ladoMayor <= limite) {
       return objectUrl
     }
@@ -640,49 +537,41 @@ async function prepararOriginalSeguro(
 
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
-    const ajustada = await new Promise<string>((resolve) => {
+    const reducida = await new Promise<string | null>((resolve) => {
       canvas.toBlob(
         (nuevoBlob) => {
-          resolve(nuevoBlob ? URL.createObjectURL(nuevoBlob) : objectUrl)
+          resolve(nuevoBlob ? URL.createObjectURL(nuevoBlob) : null)
         },
         'image/jpeg',
-        0.95
+        0.92
       )
     })
 
-    return ajustada
+    if (reducida) {
+      URL.revokeObjectURL(objectUrl)
+      return reducida
+    }
+
+    return objectUrl
   } catch {
-    return src
+    return objectUrl
   }
 }
 
 /* =========================================================
    FUENTE DE CADA ESCENA
-   nivel 0 = normal, 1 = reducida a 4096, 2 = reducida a 2048
+   nivel 0 = tamaño normal de la escena
+   nivel 1 = reducida a 2048 (plan B si la GPU no aguanta)
    ========================================================= */
 
 function fuenteParaEscena(
   definition: SceneDef,
   nivel: number = 0,
   onProgress?: (pct: number | null) => void
-): Promise<string> {
-  if (nivel === 1) {
-    return prepararFuenteSegura(definition.src, 4096, true, true)
-  }
+): Promise<string | null> {
+  const dim = nivel >= 1 ? 2048 : definition.maxTextureDim ?? MAX_TEXTURE_DIM
 
-  if (nivel >= 2) {
-    return prepararFuenteSegura(definition.src, 2048, true, true)
-  }
-
-  if (definition.usarOriginal) {
-    return prepararOriginalSeguro(definition.src, onProgress)
-  }
-
-  return prepararFuenteSegura(
-    definition.src,
-    definition.maxTextureDim ?? MAX_TEXTURE_DIM,
-    definition.skipSharpen ?? false
-  )
+  return prepararImagen(definition.src, dim, onProgress)
 }
 
 /* =========================================================
@@ -715,17 +604,14 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
   const [exiting, setExiting] = useState(false)
   const [retryKey, setRetryKey] = useState(0)
 
-  const [overlayText, setOverlayText] = useState('Optimizando imagen 360°...')
+  const [overlayText, setOverlayText] = useState(TEXTO_OPTIMIZANDO)
   const [overlayVisible, setOverlayVisible] = useState(true)
   const [overlayMounted, setOverlayMounted] = useState(true)
 
   const [infoPanel, setInfoPanel] = useState<{
     label: string
     lines: string[]
-    link?: {
-      url: string
-      text: string
-    }
+    link?: { url: string; text: string }
   } | null>(null)
 
   const [errorCarga, setErrorCarga] = useState<string | null>(null)
@@ -774,13 +660,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     panorama.addEventListener(
       'click',
       (event: {
-        intersects?: Array<{
-          point: {
-            x: number
-            y: number
-            z: number
-          }
-        }>
+        intersects?: Array<{ point: { x: number; y: number; z: number } }>
       }) => {
         const point = event.intersects?.[0]?.point
 
@@ -817,11 +697,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
       info.addHoverText(label, 24)
 
       info.addEventListener('click', () => {
-        setInfoPanel({
-          label,
-          lines,
-          link,
-        })
+        setInfoPanel({ label, lines, link })
       })
 
       panorama.add(info)
@@ -845,7 +721,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
         setErrorFatal(false)
         setReady(false)
         setRevealed(false)
-        setOverlayText('Optimizando imagen 360°...')
+        setOverlayText(TEXTO_OPTIMIZANDO)
         setOverlayVisible(true)
 
         const PANOLENS = await import('panolens')
@@ -867,15 +743,11 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
 
         viewerRef.current = viewer
 
-        /* ===============================================
-           RENDIMIENTO
-           =============================================== */
+        /* RENDIMIENTO */
 
         try {
           const internal = viewer as unknown as {
-            renderer?: {
-              setPixelRatio: (ratio: number) => void
-            }
+            renderer?: { setPixelRatio: (ratio: number) => void }
             onWindowResize?: () => void
           }
 
@@ -888,49 +760,55 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
           // continuar
         }
 
-        /* ===============================================
-           CARGAR TERMINAL CON PLAN B
-           nivel 0: original
-           nivel 1: reducida a 4096
-           nivel 2: reducida a 2048
-           =============================================== */
+        /* CARGAR TERMINAL
+           nivel 0: tamaño normal de la escena
+           nivel 1: reducida a 2048 (plan B) */
 
         const startDefinition = SCENES[START_SCENE]
 
         let primera: PanolensNS.ImagePanorama | null = null
 
-        for (let nivel = 0; nivel <= 2; nivel++) {
+        for (let nivel = 0; nivel <= 1; nivel++) {
           if (cancelled) return
 
-          if (nivel === 0) {
-            setOverlayText('Optimizando imagen 360°...')
-          } else {
-            setOverlayText('Ajustando imagen para tu dispositivo...')
-          }
+          setOverlayText(
+            nivel === 0
+              ? TEXTO_OPTIMIZANDO
+              : 'Ajustando imagen para tu dispositivo...'
+          )
 
           const srcSeguro = await fuenteParaEscena(
             startDefinition,
             nivel,
             (pct) => {
               if (cancelled) return
-              if (pct === null) {
-                setOverlayText('Descargando imagen 360°...')
-              } else {
-                setOverlayText(`Descargando imagen 360°... ${pct}%`)
-              }
+              setOverlayText(
+                pct === null
+                  ? 'Descargando imagen 360°...'
+                  : `Descargando imagen 360°... ${pct}%`
+              )
             }
           )
 
           if (cancelled) return
 
-          setOverlayText('Optimizando imagen 360°...')
+          // null = el archivo no existe en el servidor (ni con otra capitalización)
+          if (!srcSeguro) {
+            setOverlayVisible(false)
+            setErrorFatal(true)
+            setErrorCarga(
+              `No se encontró la imagen ${startDefinition.src} en el servidor. Verificá que el archivo exista en /public con ese nombre exacto.`
+            )
+            return
+          }
+
+          setOverlayText(TEXTO_OPTIMIZANDO)
 
           const pano = buildScenePanorama(PANOLENS, START_SCENE, srcSeguro)
 
-          if (nivel === 0) {
-            viewer.add(pano)
-          } else {
-            viewer.add(pano)
+          viewer.add(pano)
+
+          if (nivel > 0) {
             viewer.setPanorama(pano)
           }
 
@@ -970,6 +848,10 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
         }
 
         panoramaCacheRef.current.set(START_SCENE, primera)
+
+        // Calentamiento: renderiza frames con el loader todavía encima
+        // para que la textura ya esté en la GPU cuando el usuario gire.
+        setOverlayText(TEXTO_OPTIMIZANDO)
 
         await esperarFrames(WARMUP_FRAMES, WARMUP_MAX_MS)
 
@@ -1104,7 +986,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
 
       const srcSeguro = await fuenteParaEscena(definition)
 
-      if (!viewerRef.current) {
+      if (!srcSeguro || !viewerRef.current) {
         return null
       }
 
@@ -1233,9 +1115,7 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
 
       viewer.camera.updateProjectionMatrix()
 
-      setVeil(
-        progress < 0.55 ? 0 : easeInOutCubic((progress - 0.55) / 0.45)
-      )
+      setVeil(progress < 0.55 ? 0 : easeInOutCubic((progress - 0.55) / 0.45))
     })
 
     if (!viewerRef.current) {
@@ -1287,16 +1167,16 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
     }
 
     if (!cargada) {
-      // Sacamos la escena fallida del caché para poder reintentar.
       panoramaCacheRef.current.delete(targetId)
 
       fallar('La imagen está tardando demasiado en cargar. Volvé a intentar.')
       return
     }
 
-    setOverlayText('Optimizando imagen 360°...')
+    // Calentamiento de la nueva textura con la pantalla todavía oscura
+    setOverlayText(TEXTO_OPTIMIZANDO)
 
-    await esperarFrames(8, 800)
+    await esperarFrames(20, 1500)
 
     hideSpinner()
 
@@ -1379,7 +1259,12 @@ export default function InteriorTour({ onExit }: InteriorTourProps) {
 
   return (
     <div className={`tvisit-stage ${exiting ? 'tvisit-stage--exiting' : ''}`}>
-      <div ref={containerRef} className="tvisit-viewer" />
+      {/* El visor no recibe toques hasta que todo terminó de cargar */}
+      <div
+        ref={containerRef}
+        className="tvisit-viewer"
+        style={{ pointerEvents: revealed ? 'auto' : 'none' }}
+      />
 
       <div
         ref={veilRef}
